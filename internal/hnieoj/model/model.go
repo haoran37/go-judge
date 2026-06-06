@@ -71,6 +71,7 @@ type Event struct {
 	TotalCase    int         `json:"totalCase"`
 	JudgedCase   int         `json:"judgedCase"`
 	CurrentCase  int         `json:"currentCase"`
+	Score        int         `json:"score,omitempty"`
 	CaseResult   *CaseResult `json:"caseResult,omitempty"`
 	Message      string      `json:"message"`
 	EventTime    time.Time   `json:"eventTime"`

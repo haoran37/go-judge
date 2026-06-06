@@ -120,6 +120,7 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 	}
 	message := fmt.Sprintf("Judge finished: %s", model.StatusText(finalStatus))
 	event := model.NewEvent(model.EventJudgeFinished, task, finalStatus, total, total, total, nil, message)
+	event.Score = totalScore
 	if err := p.reporter.ReportJudgeFinished(ctx, event); err != nil {
 		return ErrRetryable{Err: err}
 	}

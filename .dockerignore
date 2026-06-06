@@ -1,0 +1,10 @@
+.git
+.github
+tmp
+dist
+node_modules
+*.exe
+*.test
+*.out
+config.yaml
+env*.sh

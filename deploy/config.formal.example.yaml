@@ -1,37 +1,37 @@
 node:
   name: judge-node-01
   type: formal
-  maxConcurrency: 4
+  maxConcurrency: 2
 
 hnieoj:
-  baseUrl: "https://oj.example.com"
+  baseUrl: "http://gateway:8800"
   requestTimeout: "30s"
   formalToken:
-    encryptedToken: "{rsa}Base64CipherText"
+    encryptedToken: "replace_me"
     privateKeyPath: "/etc/hnieoj/judge-security/judge_formal_private.pem"
     cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
   tempToken:
     authCode: ""
 
 rabbitmq:
-  host: "127.0.0.1"
+  host: "rabbitmq"
   port: 5672
-  username: "guest"
+  username: "hnieoj_judge"
   password: "replace_me"
-  virtualHost: "/"
+  virtualHost: "hnieoj"
   exchange: "hnieoj.judge.exchange"
   queue: "hnieoj.judge.task"
   routingKey: "judge.submission.created"
   deadLetterExchange: "hnieoj.judge.dlx"
   deadLetterQueue: "hnieoj.judge.task.dlq"
   deadLetterRoutingKey: "judge.submission.created.dlq"
-  prefetch: 4
+  prefetch: 2
 
 testdata:
   cacheRoot: "/data/oj/judge-cache"
 
 gojudge:
-  endpoint: "http://127.0.0.1:5050"
+  endpoint: "http://go-judge-sandbox:5050"
   authToken: ""
 
 reporter:

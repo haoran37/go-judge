@@ -45,15 +45,18 @@ type TempToken struct {
 }
 
 type RabbitMQConfig struct {
-	Host        string `yaml:"host"`
-	Port        int    `yaml:"port"`
-	Username    string `yaml:"username"`
-	Password    string `yaml:"password"`
-	VirtualHost string `yaml:"virtualHost"`
-	Exchange    string `yaml:"exchange"`
-	Queue       string `yaml:"queue"`
-	RoutingKey  string `yaml:"routingKey"`
-	Prefetch    int    `yaml:"prefetch"`
+	Host                 string `yaml:"host"`
+	Port                 int    `yaml:"port"`
+	Username             string `yaml:"username"`
+	Password             string `yaml:"password"`
+	VirtualHost          string `yaml:"virtualHost"`
+	Exchange             string `yaml:"exchange"`
+	Queue                string `yaml:"queue"`
+	RoutingKey           string `yaml:"routingKey"`
+	DeadLetterExchange   string `yaml:"deadLetterExchange"`
+	DeadLetterQueue      string `yaml:"deadLetterQueue"`
+	DeadLetterRoutingKey string `yaml:"deadLetterRoutingKey"`
+	Prefetch             int    `yaml:"prefetch"`
 }
 
 type TestdataConfig struct {
@@ -119,15 +122,18 @@ func defaultConfig() *Config {
 			},
 		},
 		RabbitMQ: RabbitMQConfig{
-			Host:        "127.0.0.1",
-			Port:        5672,
-			Username:    "guest",
-			Password:    "guest",
-			VirtualHost: "/",
-			Exchange:    "hnieoj.judge.exchange",
-			Queue:       "hnieoj.judge.task",
-			RoutingKey:  "judge.submission.created",
-			Prefetch:    1,
+			Host:                 "127.0.0.1",
+			Port:                 5672,
+			Username:             "guest",
+			Password:             "guest",
+			VirtualHost:          "/",
+			Exchange:             "hnieoj.judge.exchange",
+			Queue:                "hnieoj.judge.task",
+			RoutingKey:           "judge.submission.created",
+			DeadLetterExchange:   "hnieoj.judge.dlx",
+			DeadLetterQueue:      "hnieoj.judge.task.dlq",
+			DeadLetterRoutingKey: "judge.submission.created.dlq",
+			Prefetch:             1,
 		},
 		Testdata: TestdataConfig{
 			CacheRoot: "/data/oj/judge-cache",
@@ -189,6 +195,9 @@ func applyEnv(c *Config) {
 	setString(&c.RabbitMQ.Exchange, "HNIEOJ_RABBITMQ_EXCHANGE")
 	setString(&c.RabbitMQ.Queue, "HNIEOJ_RABBITMQ_QUEUE")
 	setString(&c.RabbitMQ.RoutingKey, "HNIEOJ_RABBITMQ_ROUTING_KEY")
+	setString(&c.RabbitMQ.DeadLetterExchange, "HNIEOJ_RABBITMQ_DLX")
+	setString(&c.RabbitMQ.DeadLetterQueue, "HNIEOJ_RABBITMQ_DLQ")
+	setString(&c.RabbitMQ.DeadLetterRoutingKey, "HNIEOJ_RABBITMQ_DLX_ROUTING_KEY")
 	setInt(&c.RabbitMQ.Prefetch, "HNIEOJ_RABBITMQ_PREFETCH")
 	setString(&c.Testdata.CacheRoot, "HNIEOJ_TESTDATA_CACHE_ROOT")
 	setString(&c.GoJudge.Endpoint, "HNIEOJ_GOJUDGE_ENDPOINT")

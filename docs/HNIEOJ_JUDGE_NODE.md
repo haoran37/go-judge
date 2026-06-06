@@ -44,6 +44,31 @@ For local one-shot verification without RabbitMQ:
 ./tmp/hnieoj-judge-node -config config.example.yaml -fixture ./task.fixture.json
 ```
 
+## Docker
+
+Build the HnieOJ image:
+
+```bash
+docker build -f Dockerfile.hnieoj -t hnieoj/go-judge:dev .
+```
+
+Run the sandbox service:
+
+```bash
+docker run --rm --privileged --name go-judge-sandbox -p 5050:5050 hnieoj/go-judge:dev
+```
+
+Run the HnieOJ adapter with a mounted config:
+
+```bash
+docker run --rm --name hnieoj-judge-node \
+  -v /etc/hnieoj/go-judge/config.yaml:/etc/hnieoj/go-judge/config.yaml:ro \
+  -v /etc/hnieoj/judge-security:/etc/hnieoj/judge-security:ro \
+  -v /data/oj/judge-cache:/data/oj/judge-cache \
+  hnieoj/go-judge:dev \
+  /usr/local/bin/hnieoj-judge-node -config /etc/hnieoj/go-judge/config.yaml
+```
+
 ## Backend Contracts Required
 
 RabbitMQ must publish JSON tasks to:
@@ -51,6 +76,9 @@ RabbitMQ must publish JSON tasks to:
 - Exchange: `hnieoj.judge.exchange`
 - Queue: `hnieoj.judge.task`
 - Routing key: `judge.submission.created`
+- Dead letter exchange: `hnieoj.judge.dlx`
+- Dead letter queue: `hnieoj.judge.task.dlq`
+- Dead letter routing key: `judge.submission.created.dlq`
 - ACK mode: manual
 
 Task body must follow the documented submission contract and include `submissionId`, `judgeId`, `problemId`, `language`, `code`, resource limits, `dataVersion`, and judge flags.

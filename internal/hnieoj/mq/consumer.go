@@ -41,7 +41,29 @@ func (c *Consumer) Consume(ctx context.Context, handler func(context.Context, mo
 	if err := ch.ExchangeDeclare(c.cfg.Exchange, "direct", true, false, false, false, nil); err != nil {
 		return err
 	}
-	q, err := ch.QueueDeclare(c.cfg.Queue, true, false, false, false, nil)
+	if c.cfg.DeadLetterExchange != "" {
+		if err := ch.ExchangeDeclare(c.cfg.DeadLetterExchange, "direct", true, false, false, false, nil); err != nil {
+			return err
+		}
+	}
+	if c.cfg.DeadLetterQueue != "" {
+		if _, err := ch.QueueDeclare(c.cfg.DeadLetterQueue, true, false, false, false, nil); err != nil {
+			return err
+		}
+		if c.cfg.DeadLetterExchange != "" && c.cfg.DeadLetterRoutingKey != "" {
+			if err := ch.QueueBind(c.cfg.DeadLetterQueue, c.cfg.DeadLetterRoutingKey, c.cfg.DeadLetterExchange, false, nil); err != nil {
+				return err
+			}
+		}
+	}
+	queueArgs := amqp.Table{}
+	if c.cfg.DeadLetterExchange != "" {
+		queueArgs["x-dead-letter-exchange"] = c.cfg.DeadLetterExchange
+	}
+	if c.cfg.DeadLetterRoutingKey != "" {
+		queueArgs["x-dead-letter-routing-key"] = c.cfg.DeadLetterRoutingKey
+	}
+	q, err := ch.QueueDeclare(c.cfg.Queue, true, false, false, false, queueArgs)
 	if err != nil {
 		return err
 	}
