@@ -1,0 +1,41 @@
+node:
+  name: judge-node-01
+  type: formal
+  maxConcurrency: 4
+
+hnieoj:
+  baseUrl: "https://oj.example.com"
+  requestTimeout: "30s"
+  formalToken:
+    encryptedToken: "{rsa}Base64CipherText"
+    privateKeyPath: "/etc/hnieoj/judge-security/judge_formal_private.pem"
+    cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
+  tempToken:
+    authCode: ""
+
+rabbitmq:
+  host: "127.0.0.1"
+  port: 5672
+  username: "guest"
+  password: "replace_me"
+  virtualHost: "/"
+  exchange: "hnieoj.judge.exchange"
+  queue: "hnieoj.judge.task"
+  routingKey: "judge.submission.created"
+  prefetch: 4
+
+testdata:
+  cacheRoot: "/data/oj/judge-cache"
+
+gojudge:
+  endpoint: "http://127.0.0.1:5050"
+  authToken: ""
+
+reporter:
+  mode: "http"
+  endpoint: "/judge/submissions/{submissionId}/events"
+
+heartbeat:
+  enabled: false
+  endpoint: "/judge/nodes/heartbeat"
+  interval: "30s"

@@ -408,7 +408,7 @@ func checkPathPrefix(path, prefix string) (bool, error) {
 
 	rel, err := filepath.Rel(resolvedPrefix, resolvedPath)
 	if err != nil {
-		return false, err
+		return false, nil
 	}
 	if rel == "." {
 		return true, nil
