@@ -7,9 +7,14 @@ hnieoj:
   baseUrl: "http://gateway:8800"
   requestTimeout: "30s"
   formalToken:
-    encryptedToken: "replace_me"
     privateKeyPath: "/etc/hnieoj/judge-security/judge_formal_private.pem"
     cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
+    refreshInterval: "30s"
+    nacos:
+      serverAddr: "http://106.54.177.244:8848"
+      namespace: "dev"
+      group: "HNIEOJ_SECRET_GROUP"
+      dataId: "hnieoj-judge-formal-token.yaml"
   tempToken:
     authCode: ""
 

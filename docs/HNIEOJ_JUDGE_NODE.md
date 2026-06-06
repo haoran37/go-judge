@@ -4,7 +4,7 @@
 
 ## Architecture
 
-- `internal/hnieoj/auth`: formal token decryption and temp JWT exchange.
+- `internal/hnieoj/auth`: formal token polling/decryption and temp JWT exchange.
 - `internal/hnieoj/testdata`: versioned testdata cache under `{cacheRoot}/problems/{problemId}`.
 - `internal/hnieoj/runner`: HTTP client for go-judge `/run`, language commands, output comparison, and status mapping.
 - `internal/hnieoj/reporter`: replaceable `http` and `log/mock` event reporters.
@@ -19,14 +19,23 @@ Start from `config.example.yaml`. Key environment overrides:
 
 - `HNIEOJ_NODE_NAME`, `HNIEOJ_NODE_TYPE`, `HNIEOJ_NODE_MAX_CONCURRENCY`
 - `HNIEOJ_BASE_URL`, `HNIEOJ_REQUEST_TIMEOUT`
-- `HNIEOJ_FORMAL_ENCRYPTED_TOKEN`, `HNIEOJ_FORMAL_PRIVATE_KEY_PATH`
+- `HNIEOJ_FORMAL_PRIVATE_KEY_PATH`
+- `HNIEOJ_NACOS_SERVER_ADDR`, `HNIEOJ_NACOS_NAMESPACE`, `HNIEOJ_FORMAL_TOKEN_NACOS_GROUP`, `HNIEOJ_FORMAL_TOKEN_NACOS_DATA_ID`
 - `HNIEOJ_TEMP_AUTH_CODE`
 - `HNIEOJ_RABBITMQ_HOST`, `HNIEOJ_RABBITMQ_PORT`, `HNIEOJ_RABBITMQ_USERNAME`, `HNIEOJ_RABBITMQ_PASSWORD`
 - `HNIEOJ_TESTDATA_CACHE_ROOT`
 - `HNIEOJ_GOJUDGE_ENDPOINT`, `HNIEOJ_GOJUDGE_AUTH_TOKEN`
 - `HNIEOJ_REPORTER_MODE`, `HNIEOJ_REPORTER_ENDPOINT`
 
-Formal nodes decrypt `{rsa}Base64CipherText` with a local PKCS#8 PEM private key and send `X-Judge-Token`. Temp nodes call `POST /api/judge/temp-token` and send `Authorization: Bearer ...`.
+Formal nodes read the encrypted formal token from Nacos, decrypt `{rsa}Base64CipherText` with a local PKCS#8 PEM private key, and send `X-Judge-Token`. Temp nodes call `POST /api/judge/temp-token` and send `Authorization: Bearer ...`.
+
+Formal token rotation is initiated by the backend admin endpoint:
+
+```http
+POST /api/admin/judge/nodes/formal-token/rotate
+```
+
+The backend stores only the token hash, encrypts the new token with the formal public key, and publishes ciphertext to `hnieoj-judge-formal-token.yaml`. The node refreshes the Nacos ciphertext periodically and does not need to restart after rotation.
 
 ## Run
 
@@ -124,7 +133,7 @@ POST /judge/nodes/heartbeat
 
 ## Validation Checklist
 
-1. Formal token decrypts with RSA OAEP SHA-256.
+1. Formal token is fetched from Nacos and decrypts with RSA OAEP SHA-256.
 2. Temp token exchange returns a usable JWT.
 3. Testdata download handles `304 Not Modified`.
 4. ZIP extraction rejects paths, directories, and non `.in/.out` files.

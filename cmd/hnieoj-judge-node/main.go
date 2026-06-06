@@ -68,7 +68,7 @@ func main() {
 	}
 }
 
-func buildReporter(cfg config.Config, httpClient *http.Client, cred auth.Credential, logger logging.Logger) reporter.Reporter {
+func buildReporter(cfg config.Config, httpClient *http.Client, cred *auth.Credential, logger logging.Logger) reporter.Reporter {
 	if cfg.Reporter.Mode == "log" || cfg.Reporter.Mode == "mock" {
 		return reporter.NewLog(logger)
 	}

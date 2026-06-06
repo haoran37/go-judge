@@ -18,12 +18,12 @@ type Processor struct {
 	testdataClient *testdata.Client
 	runnerClient   *runner.Client
 	reporter       reporter.Reporter
-	cred           auth.Credential
+	cred           *auth.Credential
 	logger         logging.Logger
 	inFlight       sync.Map
 }
 
-func New(testdataClient *testdata.Client, runnerClient *runner.Client, reporter reporter.Reporter, cred auth.Credential, logger logging.Logger) *Processor {
+func New(testdataClient *testdata.Client, runnerClient *runner.Client, reporter reporter.Reporter, cred *auth.Credential, logger logging.Logger) *Processor {
 	return &Processor{
 		testdataClient: testdataClient,
 		runnerClient:   runnerClient,

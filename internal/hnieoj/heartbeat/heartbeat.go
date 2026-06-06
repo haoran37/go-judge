@@ -20,7 +20,7 @@ const Version = "hnieoj-go-judge-0.1.0"
 
 type Client struct {
 	cfg        config.Config
-	cred       auth.Credential
+	cred       *auth.Credential
 	httpClient *http.Client
 	logger     logging.Logger
 	running    *atomic.Int64
@@ -36,7 +36,7 @@ type Payload struct {
 	Version        string `json:"version"`
 }
 
-func New(cfg config.Config, cred auth.Credential, httpClient *http.Client, logger logging.Logger, running *atomic.Int64) *Client {
+func New(cfg config.Config, cred *auth.Credential, httpClient *http.Client, logger logging.Logger, running *atomic.Int64) *Client {
 	return &Client{cfg: cfg, cred: cred, httpClient: httpClient, logger: logger, running: running}
 }
 

@@ -38,6 +38,15 @@ type FormalToken struct {
 	EncryptedToken  string `yaml:"encryptedToken"`
 	PrivateKeyPath  string `yaml:"privateKeyPath"`
 	CipherAlgorithm string `yaml:"cipherAlgorithm"`
+	Nacos           NacosConfig `yaml:"nacos"`
+	RefreshInterval time.Duration `yaml:"refreshInterval"`
+}
+
+type NacosConfig struct {
+	ServerAddr string `yaml:"serverAddr"`
+	Namespace  string `yaml:"namespace"`
+	Group      string `yaml:"group"`
+	DataID     string `yaml:"dataId"`
 }
 
 type TempToken struct {
@@ -119,6 +128,14 @@ func defaultConfig() *Config {
 			RequestTimeout: 30 * time.Second,
 			FormalToken: FormalToken{
 				CipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding",
+				PrivateKeyPath:  "/etc/hnieoj/judge-security/judge_formal_private.pem",
+				RefreshInterval: 30 * time.Second,
+				Nacos: NacosConfig{
+					ServerAddr: "http://127.0.0.1:8848",
+					Namespace:  "dev",
+					Group:      "HNIEOJ_SECRET_GROUP",
+					DataID:     "hnieoj-judge-formal-token.yaml",
+				},
 			},
 		},
 		RabbitMQ: RabbitMQConfig{
@@ -186,6 +203,11 @@ func applyEnv(c *Config) {
 	setDuration(&c.HnieOJ.RequestTimeout, "HNIEOJ_REQUEST_TIMEOUT")
 	setString(&c.HnieOJ.FormalToken.EncryptedToken, "HNIEOJ_FORMAL_ENCRYPTED_TOKEN")
 	setString(&c.HnieOJ.FormalToken.PrivateKeyPath, "HNIEOJ_FORMAL_PRIVATE_KEY_PATH")
+	setDuration(&c.HnieOJ.FormalToken.RefreshInterval, "HNIEOJ_FORMAL_TOKEN_REFRESH_INTERVAL")
+	setString(&c.HnieOJ.FormalToken.Nacos.ServerAddr, "HNIEOJ_NACOS_SERVER_ADDR")
+	setString(&c.HnieOJ.FormalToken.Nacos.Namespace, "HNIEOJ_NACOS_NAMESPACE")
+	setString(&c.HnieOJ.FormalToken.Nacos.Group, "HNIEOJ_FORMAL_TOKEN_NACOS_GROUP")
+	setString(&c.HnieOJ.FormalToken.Nacos.DataID, "HNIEOJ_FORMAL_TOKEN_NACOS_DATA_ID")
 	setString(&c.HnieOJ.TempToken.AuthCode, "HNIEOJ_TEMP_AUTH_CODE")
 	setString(&c.RabbitMQ.Host, "HNIEOJ_RABBITMQ_HOST")
 	setInt(&c.RabbitMQ.Port, "HNIEOJ_RABBITMQ_PORT")
