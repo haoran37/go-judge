@@ -167,14 +167,6 @@ hnieoj-judge-node doctor -config /etc/hnieoj/go-judge/config.yaml
 
 For Docker-based initialization, run the setup command in a one-shot container with the config and security directories mounted, then start the generated compose file.
 
-The repository also provides a wrapper script for server deployment:
-
-```bash
-bash deploy/deploy-judge-node.sh
-```
-
-The script builds the local image, prepares directories, creates or reuses the Docker network, runs the interactive CLI initializer, optionally runs `auth-exchange`, and starts the generated compose file. It is only a deployment wrapper; configuration validation and temp token exchange still use `hnieoj-judge-node` CLI.
-
 ## Validation Checklist
 
 1. Formal token is fetched from Nacos and decrypts with RSA OAEP SHA-256.

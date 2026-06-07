@@ -80,7 +80,7 @@ func runInit(args []string) error {
 	rabbitVhost := prompt(reader, "RabbitMQ vhost", "hnieoj")
 	cacheRoot := prompt(reader, "Testdata cache directory", defaultCacheRoot)
 	image := prompt(reader, "Docker image", "hnieoj/go-judge:dev")
-	dockerNetwork := prompt(reader, "Existing Docker network, use private to create a new network", "hnieoj-judge-net")
+	dockerNetwork := prompt(reader, "Existing Docker network, use private to create a new network", "hnieoj-dev_hnieoj-backend")
 
 	securityDir := defaultSecurityDir
 	privateKeyPath := filepath.Join(securityDir, defaultPrivateKeyName)
