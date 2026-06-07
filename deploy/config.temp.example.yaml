@@ -1,0 +1,58 @@
+node:
+  name: judge-node-temp-01
+  type: temp
+  maxConcurrency: 2
+
+remoteConfig:
+  enabled: false
+
+hnieoj:
+  baseUrl: "http://127.0.0.1:8800"
+  requestTimeout: "30s"
+  formalToken:
+    privateKeyPath: ""
+    cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
+    refreshInterval: "30s"
+    nacos:
+      serverAddr: ""
+      namespace: ""
+      group: ""
+      dataId: ""
+  tempToken:
+    authCode: "replace_me"
+
+rabbitmq:
+  host: "127.0.0.1"
+  port: 5672
+  username: "hnieoj_judge"
+  password: "replace_me"
+  virtualHost: "hnieoj"
+  exchange: "hnieoj.judge.exchange"
+  queue: "hnieoj.judge.task"
+  routingKey: "judge.submission.created"
+  deadLetterExchange: "hnieoj.judge.dlx"
+  deadLetterQueue: "hnieoj.judge.task.dlq"
+  deadLetterRoutingKey: "judge.submission.created.dlq"
+  prefetch: 2
+  maxRetries: 3
+  retryBackoff: "10s"
+
+testdata:
+  cacheRoot: "/data/oj/judge-cache"
+  maxCacheBytes: 21474836480
+  maxUnusedDuration: "72h"
+  cleanupInterval: "1h"
+  statsInterval: "5m"
+
+gojudge:
+  endpoint: "http://go-judge-sandbox:5050"
+  authToken: ""
+
+reporter:
+  mode: "http"
+  endpoint: "/judge/submissions/{submissionId}/events"
+
+heartbeat:
+  enabled: true
+  endpoint: "/judge/nodes/heartbeat"
+  interval: "30s"

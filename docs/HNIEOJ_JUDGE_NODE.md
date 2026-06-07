@@ -152,6 +152,34 @@ Use this remote config for shared operational settings such as `testdata.maxCach
 
 The testdata cleaner removes cached problem data that has not been used for `maxUnusedDuration`, then evicts the least recently used cached problems until total cache usage is below `maxCacheBytes`. Set either value to `0` to disable that cleanup condition.
 
+## Standalone Deployment
+
+Use the deployment wrapper on a judge node server:
+
+```bash
+bash deploy/deploy-judge-node.sh
+```
+
+The script writes one runtime YAML file to `/etc/hnieoj/go-judge/config.yaml`, writes a compose file to `/etc/hnieoj/go-judge/docker-compose.yml`, builds `hnieoj/go-judge:dev`, and starts the sandbox plus HnieOJ judge node containers.
+
+You can also fill a template manually:
+
+```bash
+cp deploy/config.formal.example.yaml /etc/hnieoj/go-judge/config.yaml
+# or
+cp deploy/config.temp.example.yaml /etc/hnieoj/go-judge/config.yaml
+vi /etc/hnieoj/go-judge/config.yaml
+bash deploy/deploy-judge-node.sh up
+```
+
+Formal nodes require Nacos settings and the fixed private key file:
+
+```text
+/etc/hnieoj/judge-security/judge_formal_private.pem
+```
+
+Temp nodes do not require Nacos settings. They only need `hnieoj.baseUrl`, RabbitMQ settings, and `hnieoj.tempToken.authCode`.
+
 ## Validation Checklist
 
 1. Formal token is fetched from Nacos and decrypts with RSA OAEP SHA-256.
