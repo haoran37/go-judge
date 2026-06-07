@@ -27,7 +27,10 @@ hnieoj:
       group: "HNIEOJ_SECRET_GROUP"
       dataId: "hnieoj-judge-formal-token.yaml"
   tempToken:
+    # 临时节点授权码只建议交互式输入，不建议长期写入配置文件。
     authCode: ""
+    # 临时 JWT 缓存文件，auth-exchange 成功后写入，文件权限应为 0600。
+    cachePath: "/etc/hnieoj/go-judge/temp-token.json"
 
 rabbitmq:
   host: "rabbitmq"

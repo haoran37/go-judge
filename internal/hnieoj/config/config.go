@@ -56,7 +56,8 @@ type NacosConfig struct {
 }
 
 type TempToken struct {
-	AuthCode string `yaml:"authCode"`
+	AuthCode  string `yaml:"authCode"`
+	CachePath string `yaml:"cachePath"`
 }
 
 type RabbitMQConfig struct {
@@ -157,6 +158,9 @@ func defaultConfig() *Config {
 					Group:      "HNIEOJ_SECRET_GROUP",
 					DataID:     "hnieoj-judge-formal-token.yaml",
 				},
+			},
+			TempToken: TempToken{
+				CachePath: "/etc/hnieoj/go-judge/temp-token.json",
 			},
 		},
 		RabbitMQ: RabbitMQConfig{
@@ -263,6 +267,7 @@ func applyEnv(c *Config) {
 	setString(&c.HnieOJ.FormalToken.Nacos.Group, "HNIEOJ_FORMAL_TOKEN_NACOS_GROUP")
 	setString(&c.HnieOJ.FormalToken.Nacos.DataID, "HNIEOJ_FORMAL_TOKEN_NACOS_DATA_ID")
 	setString(&c.HnieOJ.TempToken.AuthCode, "HNIEOJ_TEMP_AUTH_CODE")
+	setString(&c.HnieOJ.TempToken.CachePath, "HNIEOJ_TEMP_TOKEN_CACHE_PATH")
 	setString(&c.RabbitMQ.Host, "HNIEOJ_RABBITMQ_HOST")
 	setInt(&c.RabbitMQ.Port, "HNIEOJ_RABBITMQ_PORT")
 	setString(&c.RabbitMQ.Username, "HNIEOJ_RABBITMQ_USERNAME")

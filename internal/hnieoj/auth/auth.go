@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -62,10 +63,94 @@ func Authenticate(ctx context.Context, cfg config.Config, client *http.Client) (
 		startFormalTokenRefresher(ctx, cfg.HnieOJ.FormalToken, client, cred)
 		return cred, nil
 	case "temp":
-		return exchangeTempToken(ctx, cfg, client)
+		return ResolveTempCredential(ctx, cfg, client)
 	default:
 		return nil, fmt.Errorf("unsupported node type %q", cfg.Node.Type)
 	}
+}
+
+type TempTokenCache struct {
+	Token      string `json:"token"`
+	TokenType  string `json:"tokenType"`
+	NodeID     string `json:"nodeId"`
+	TokenID    string `json:"tokenId"`
+	ExpireTime string `json:"expireTime"`
+}
+
+func ResolveTempCredential(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
+	if cred, err := LoadTempTokenCache(cfg.HnieOJ.TempToken.CachePath); err == nil {
+		return cred, nil
+	}
+	if cfg.HnieOJ.TempToken.AuthCode == "" {
+		return nil, errors.New("temp auth code or valid temp token cache is required")
+	}
+	cred, cache, err := ExchangeTempToken(ctx, cfg, client)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.HnieOJ.TempToken.CachePath != "" {
+		if err := SaveTempTokenCache(cfg.HnieOJ.TempToken.CachePath, cache); err != nil {
+			return nil, err
+		}
+	}
+	return cred, nil
+}
+
+func LoadTempTokenCache(path string) (*Credential, error) {
+	if path == "" {
+		return nil, errors.New("temp token cache path is empty")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cache TempTokenCache
+	if err := json.Unmarshal(b, &cache); err != nil {
+		return nil, err
+	}
+	return credentialFromTempTokenCache(cache)
+}
+
+func SaveTempTokenCache(path string, cache TempTokenCache) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func credentialFromTempTokenCache(cache TempTokenCache) (*Credential, error) {
+	token := strings.TrimSpace(cache.Token)
+	if token == "" {
+		return nil, errors.New("temp token cache token is empty")
+	}
+	tokenType := strings.TrimSpace(cache.TokenType)
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+	expireTime, err := parseExpireTime(cache.ExpireTime)
+	if err != nil {
+		return nil, err
+	}
+	if !expireTime.IsZero() && !time.Now().Before(expireTime) {
+		return nil, errors.New("temp token cache is expired")
+	}
+	return &Credential{
+		HeaderName:  "Authorization",
+		HeaderValue: tokenType + " " + token,
+		NodeID:      strings.TrimSpace(cache.NodeID),
+		TokenID:     strings.TrimSpace(cache.TokenID),
+		ExpireTime:  expireTime,
+	}, nil
 }
 
 func resolveFormalToken(ctx context.Context, cfg config.FormalToken, client *http.Client) (string, error) {
@@ -233,36 +318,37 @@ type tempTokenResponse struct {
 	} `json:"data"`
 }
 
-func exchangeTempToken(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
+func ExchangeTempToken(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, TempTokenCache, error) {
 	if cfg.HnieOJ.TempToken.AuthCode == "" {
-		return nil, errors.New("temp auth code is required")
+		return nil, TempTokenCache{}, errors.New("temp auth code is required")
 	}
 	body, err := json.Marshal(tempTokenRequest{
 		AuthCode: cfg.HnieOJ.TempToken.AuthCode,
 		NodeName: cfg.Node.Name,
 	})
 	if err != nil {
-		return nil, err
+		return nil, TempTokenCache{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.HnieOJ.BaseURL, "/")+"/api/judge/temp-token", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, TempTokenCache{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, TempTokenCache{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("temp token exchange failed with status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, TempTokenCache{}, fmt.Errorf("temp token exchange failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var out tempTokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		return nil, TempTokenCache{}, err
 	}
 	if out.Code != 200 || out.Data.Token == "" {
-		return nil, fmt.Errorf("temp token exchange failed: %s", out.Msg)
+		return nil, TempTokenCache{}, fmt.Errorf("temp token exchange failed: %s", out.Msg)
 	}
 	tokenType := out.Data.TokenType
 	if tokenType == "" {
@@ -270,7 +356,14 @@ func exchangeTempToken(ctx context.Context, cfg config.Config, client *http.Clie
 	}
 	expireTime, err := parseExpireTime(out.Data.ExpireTime)
 	if err != nil {
-		return nil, err
+		return nil, TempTokenCache{}, err
+	}
+	cache := TempTokenCache{
+		Token:      out.Data.Token,
+		TokenType:  tokenType,
+		NodeID:     out.Data.NodeID,
+		TokenID:    out.Data.TokenID,
+		ExpireTime: out.Data.ExpireTime,
 	}
 	return &Credential{
 		HeaderName:  "Authorization",
@@ -278,7 +371,7 @@ func exchangeTempToken(ctx context.Context, cfg config.Config, client *http.Clie
 		NodeID:      out.Data.NodeID,
 		TokenID:     out.Data.TokenID,
 		ExpireTime:  expireTime,
-	}, nil
+	}, cache, nil
 }
 
 func parseExpireTime(s string) (time.Time, error) {
