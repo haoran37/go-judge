@@ -46,6 +46,6 @@ reporter:
   endpoint: "/judge/submissions/{submissionId}/events"
 
 heartbeat:
-  enabled: false
+  enabled: true
   endpoint: "/judge/nodes/heartbeat"
   interval: "30s"

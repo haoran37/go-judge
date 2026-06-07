@@ -126,11 +126,13 @@ X-Judge-Token: {formal token}
 
 Temp nodes use `Authorization: Bearer {jwt}`. The backend should update `judge`, upsert `judge_case`, and push `/topic/submissions/{submissionId}/progress`.
 
-Optional heartbeat endpoint:
+Heartbeat endpoint:
 
 ```http
 POST /judge/nodes/heartbeat
 ```
+
+Formal deployment examples enable heartbeat by default. The backend uses it to maintain node online status, current running task count, max concurrency, CPU cores, and judge node version.
 
 ## Validation Checklist
 
