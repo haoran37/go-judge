@@ -29,7 +29,7 @@ Start from `config.example.yaml`. Key environment overrides:
 
 Formal nodes read the encrypted formal token from Nacos, decrypt `{rsa}Base64CipherText` with a local PKCS#8 PEM private key, and send `X-Judge-Token`. Temp nodes call `POST /api/judge/temp-token` and send `Authorization: Bearer ...`.
 
-Formal token rotation is initiated by the backend admin endpoint:
+When `hnieoj-judge` starts and no active formal token exists, the backend initializes one automatically and publishes ciphertext to Nacos. Formal token rotation can also be initiated by the backend admin endpoint:
 
 ```http
 POST /api/admin/judge/nodes/formal-token/rotate
