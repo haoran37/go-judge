@@ -88,7 +88,6 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 		return ErrRetryable{Err: err}
 	}
 
-	results := make([]model.CaseResult, 0, total)
 	finalStatus := model.StatusAccepted
 	totalScore := 0
 	for i, tc := range cases {
@@ -96,7 +95,7 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 		if err != nil {
 			return ErrRetryable{Err: err}
 		}
-		score := caseScore(task, total, runResult.Status)
+		score := caseScore(task, total, i, runResult.Status)
 		if task.ProblemType == model.ProblemTypeACM && runResult.Status != model.StatusAccepted {
 			score = 0
 		}
@@ -109,7 +108,6 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 			Score:      score,
 			UserOutput: runResult.UserOutput,
 		}
-		results = append(results, cr)
 		if runResult.Status != model.StatusAccepted && finalStatus == model.StatusAccepted {
 			finalStatus = runResult.Status
 		}
@@ -135,7 +133,6 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 		return ErrRetryable{Err: err}
 	}
 	p.logger.Info("judge finished", logging.String("submissionId", task.SubmissionID), logging.Int("status", finalStatus), logging.Int("score", totalScore))
-	_ = results
 	return nil
 }
 
@@ -172,14 +169,18 @@ func (e ErrNonRetryable) Unwrap() error {
 	return e.Err
 }
 
-func caseScore(task model.Task, total int, status int) int {
+func caseScore(task model.Task, total, caseIndex int, status int) int {
 	if status != model.StatusAccepted || total <= 0 {
 		return 0
 	}
 	if task.IOScore <= 0 {
 		return 0
 	}
-	return task.IOScore / total
+	base := task.IOScore / total
+	if caseIndex < task.IOScore%total {
+		return base + 1
+	}
+	return base
 }
 
 func nextCase(judged, total int) int {

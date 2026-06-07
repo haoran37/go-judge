@@ -37,3 +37,16 @@ func TestSpecForLanguages(t *testing.T) {
 		}
 	}
 }
+
+func TestJavaSpecPackagesClassFilesAsJar(t *testing.T) {
+	spec, err := specFor("java17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Artifact != "Main.jar" {
+		t.Fatalf("java artifact = %q, want Main.jar", spec.Artifact)
+	}
+	if len(spec.RunArgs) < 4 || spec.RunArgs[2] != "Main.jar" {
+		t.Fatalf("unexpected java run args: %#v", spec.RunArgs)
+	}
+}

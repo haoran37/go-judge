@@ -18,18 +18,41 @@ import (
 )
 
 type Consumer struct {
-	cfg       config.RabbitMQConfig
-	logger    logging.Logger
-	publishMu sync.Mutex
+	cfg    config.RabbitMQConfig
+	logger logging.Logger
+	amqpMu sync.Mutex
 }
 
 const retryCountHeader = "x-hnieoj-retry-count"
+const reconnectBackoff = 5 * time.Second
 
 func New(cfg config.RabbitMQConfig, logger logging.Logger) *Consumer {
 	return &Consumer{cfg: cfg, logger: logger}
 }
 
 func (c *Consumer) Consume(ctx context.Context, handler func(context.Context, model.Task) error) error {
+	for {
+		err := c.consumeOnce(ctx, handler)
+		if err == nil {
+			err = errors.New("rabbitmq consumer stopped")
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		c.logger.Warn("rabbitmq consumer disconnected, retrying",
+			logging.String("backoff", reconnectBackoff.String()),
+			logging.Error(err))
+		timer := time.NewTimer(reconnectBackoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (c *Consumer) consumeOnce(ctx context.Context, handler func(context.Context, model.Task) error) error {
 	conn, err := amqp.Dial(c.dsn())
 	if err != nil {
 		return err
@@ -94,10 +117,10 @@ func (c *Consumer) Consume(ctx context.Context, handler func(context.Context, mo
 				return errors.New("rabbitmq delivery channel closed")
 			}
 			wg.Add(1)
-			go func() {
+			go func(delivery amqp.Delivery) {
 				defer wg.Done()
-				c.handleDelivery(ctx, ch, d, handler)
-			}()
+				c.handleDelivery(ctx, ch, delivery, handler)
+			}(d)
 		}
 	}
 }
@@ -106,7 +129,7 @@ func (c *Consumer) handleDelivery(ctx context.Context, ch *amqp.Channel, d amqp.
 	var task model.Task
 	if err := json.Unmarshal(d.Body, &task); err != nil {
 		c.logger.Warn("invalid task message", logging.Error(err))
-		_ = d.Ack(false)
+		_ = c.ack(d)
 		return
 	}
 	if err := handler(ctx, task); err != nil {
@@ -117,10 +140,10 @@ func (c *Consumer) handleDelivery(ctx context.Context, ch *amqp.Channel, d amqp.
 			return
 		}
 		c.logger.Warn("task failed with non-retryable error", logging.String("submissionId", task.SubmissionID), logging.Error(err))
-		_ = d.Ack(false)
+		_ = c.ack(d)
 		return
 	}
-	_ = d.Ack(false)
+	_ = c.ack(d)
 }
 
 func (c *Consumer) retryOrDeadLetter(ctx context.Context, ch *amqp.Channel, d amqp.Delivery, task model.Task, err error) {
@@ -130,7 +153,7 @@ func (c *Consumer) retryOrDeadLetter(ctx context.Context, ch *amqp.Channel, d am
 			logging.String("submissionId", task.SubmissionID),
 			logging.Int("retryCount", retryCount),
 			logging.Error(err))
-		_ = d.Nack(false, false)
+		_ = c.nack(d, false)
 		return
 	}
 
@@ -143,7 +166,7 @@ func (c *Consumer) retryOrDeadLetter(ctx context.Context, ch *amqp.Channel, d am
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		_ = d.Nack(false, true)
+		_ = c.nack(d, true)
 		return
 	case <-timer.C:
 	}
@@ -166,22 +189,38 @@ func (c *Consumer) retryOrDeadLetter(ctx context.Context, ch *amqp.Channel, d am
 		AppId:           d.AppId,
 		Body:            d.Body,
 	}
-	c.publishMu.Lock()
-	err = ch.PublishWithContext(ctx, c.cfg.Exchange, c.cfg.RoutingKey, false, false, publishing)
-	c.publishMu.Unlock()
+	err = c.publish(ctx, ch, publishing)
 	if err != nil {
 		c.logger.Warn("republish retry task failed, dead-lettering",
 			logging.String("submissionId", task.SubmissionID),
 			logging.Int("retryCount", nextRetryCount),
 			logging.Error(err))
-		_ = d.Nack(false, false)
+		_ = c.nack(d, false)
 		return
 	}
 	c.logger.Warn("task scheduled for retry",
 		logging.String("submissionId", task.SubmissionID),
 		logging.Int("retryCount", nextRetryCount),
 		logging.String("backoff", backoff.String()))
-	_ = d.Ack(false)
+	_ = c.ack(d)
+}
+
+func (c *Consumer) ack(d amqp.Delivery) error {
+	c.amqpMu.Lock()
+	defer c.amqpMu.Unlock()
+	return d.Ack(false)
+}
+
+func (c *Consumer) nack(d amqp.Delivery, requeue bool) error {
+	c.amqpMu.Lock()
+	defer c.amqpMu.Unlock()
+	return d.Nack(false, requeue)
+}
+
+func (c *Consumer) publish(ctx context.Context, ch *amqp.Channel, publishing amqp.Publishing) error {
+	c.amqpMu.Lock()
+	defer c.amqpMu.Unlock()
+	return ch.PublishWithContext(ctx, c.cfg.Exchange, c.cfg.RoutingKey, false, false, publishing)
 }
 
 func readRetryCount(headers amqp.Table) int {

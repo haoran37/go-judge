@@ -56,3 +56,25 @@ func TestParseExpireTimeWithoutZone(t *testing.T) {
 		t.Fatalf("unexpected expire time: %v", got)
 	}
 }
+
+func TestCredentialReplace(t *testing.T) {
+	cred := &Credential{HeaderName: "Authorization", HeaderValue: "Bearer old", NodeID: "old"}
+	next := &Credential{HeaderName: "Authorization", HeaderValue: "Bearer new", NodeID: "new", TokenID: "token-2", ExpireTime: time.Now().Add(time.Hour)}
+
+	cred.Replace(next)
+
+	if cred.HeaderValue != "Bearer new" || cred.NodeID != "new" || cred.TokenID != "token-2" || cred.ExpireTime.IsZero() {
+		t.Fatalf("credential was not replaced: %+v", cred)
+	}
+}
+
+func TestTempRefreshDelayRefreshesBeforeExpiry(t *testing.T) {
+	now := time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC)
+	expire := now.Add(10 * time.Minute)
+	if got := tempRefreshDelay(expire, now); got != 9*time.Minute {
+		t.Fatalf("refresh delay = %v, want 9m", got)
+	}
+	if got := tempRefreshDelay(now.Add(30*time.Second), now); got != 0 {
+		t.Fatalf("near-expiry refresh delay = %v, want 0", got)
+	}
+}

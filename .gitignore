@@ -36,3 +36,4 @@ cmd/go-judge/version/version.txt
 
 dist/
 .vscode
+docs/

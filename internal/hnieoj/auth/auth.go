@@ -42,13 +42,41 @@ func (c *Credential) Apply(req *http.Request) {
 }
 
 func (c *Credential) Expired(now time.Time) bool {
-	return !c.ExpireTime.IsZero() && !now.Before(c.ExpireTime)
+	expireTime := c.ExpiresAt()
+	return !expireTime.IsZero() && !now.Before(expireTime)
 }
 
 func (c *Credential) SetHeaderValue(value string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.HeaderValue = value
+}
+
+func (c *Credential) ExpiresAt() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ExpireTime
+}
+
+func (c *Credential) Replace(next *Credential) {
+	if next == nil {
+		return
+	}
+	next.mu.RLock()
+	headerName := next.HeaderName
+	headerValue := next.HeaderValue
+	nodeID := next.NodeID
+	tokenID := next.TokenID
+	expireTime := next.ExpireTime
+	next.mu.RUnlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.HeaderName = headerName
+	c.HeaderValue = headerValue
+	c.NodeID = nodeID
+	c.TokenID = tokenID
+	c.ExpireTime = expireTime
 }
 
 func Authenticate(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
@@ -62,7 +90,12 @@ func Authenticate(ctx context.Context, cfg config.Config, client *http.Client) (
 		startFormalTokenRefresher(ctx, cfg.HnieOJ.FormalToken, client, cred)
 		return cred, nil
 	case "temp":
-		return exchangeTempToken(ctx, cfg, client)
+		cred, err := exchangeTempToken(ctx, cfg, client)
+		if err != nil {
+			return nil, err
+		}
+		startTempTokenRefresher(ctx, cfg, client, cred)
+		return cred, nil
 	default:
 		return nil, fmt.Errorf("unsupported node type %q", cfg.Node.Type)
 	}
@@ -115,6 +148,46 @@ func startFormalTokenRefresher(ctx context.Context, cfg config.FormalToken, clie
 			}
 		}
 	}()
+}
+
+func startTempTokenRefresher(ctx context.Context, cfg config.Config, client *http.Client, cred *Credential) {
+	go func() {
+		for {
+			wait := tempRefreshDelay(cred.ExpiresAt(), time.Now())
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			next, err := exchangeTempToken(ctx, cfg, client)
+			if err != nil {
+				timer := time.NewTimer(30 * time.Second)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+				continue
+			}
+			cred.Replace(next)
+		}
+	}()
+}
+
+func tempRefreshDelay(expireTime, now time.Time) time.Duration {
+	if expireTime.IsZero() {
+		return time.Hour
+	}
+	refreshAt := expireTime.Add(-time.Minute)
+	if !refreshAt.After(now) {
+		return 0
+	}
+	return refreshAt.Sub(now)
 }
 
 func decryptFormalToken(cfg config.FormalToken, encryptedToken string) (string, error) {

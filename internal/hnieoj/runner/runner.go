@@ -262,9 +262,9 @@ func specFor(language string) (languageSpec, error) {
 	case "java", "java17":
 		return languageSpec{
 			SourceName:  "Main.java",
-			Artifact:    "Main.class",
-			CompileArgs: []string{"/usr/bin/javac", "Main.java"},
-			RunArgs:     []string{"/usr/bin/java", "Main"},
+			Artifact:    "Main.jar",
+			CompileArgs: []string{"/bin/sh", "-c", "javac Main.java && jar cf Main.jar *.class"},
+			RunArgs:     []string{"/usr/bin/java", "-cp", "Main.jar", "Main"},
 			CompileEnv:  defaultEnv(),
 			RunEnv:      defaultEnv(),
 		}, nil
