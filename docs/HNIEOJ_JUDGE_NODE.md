@@ -152,21 +152,6 @@ Use this remote config for shared operational settings such as `testdata.maxCach
 
 The testdata cleaner removes cached problem data that has not been used for `maxUnusedDuration`, then evicts the least recently used cached problems until total cache usage is below `maxCacheBytes`. Set either value to `0` to disable that cleanup condition.
 
-## CLI Setup
-
-The judge node binary provides setup commands:
-
-```bash
-hnieoj-judge-node init
-hnieoj-judge-node auth-exchange -config /etc/hnieoj/go-judge/config.yaml
-hnieoj-judge-node config-validate -config /etc/hnieoj/go-judge/config.yaml
-hnieoj-judge-node doctor -config /etc/hnieoj/go-judge/config.yaml
-```
-
-`init` interactively writes `config.yaml` and `docker-compose.yml`. Formal nodes require the private key file at `/etc/hnieoj/judge-security/judge_formal_private.pem`. Temp nodes should run `auth-exchange`, enter the one-time auth code, and store the returned JWT in `/etc/hnieoj/go-judge/temp-token.json` with `0600` permissions. The auth code is not persisted by the CLI.
-
-For Docker-based initialization, run the setup command in a one-shot container with the config and security directories mounted, then start the generated compose file.
-
 ## Validation Checklist
 
 1. Formal token is fetched from Nacos and decrypts with RSA OAEP SHA-256.

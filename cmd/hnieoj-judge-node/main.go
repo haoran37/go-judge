@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"sync/atomic"
 	"syscall"
-	"time"
 
 	"github.com/criyle/go-judge/internal/hnieoj/auth"
 	"github.com/criyle/go-judge/internal/hnieoj/config"
@@ -26,14 +24,6 @@ import (
 )
 
 func main() {
-	if handled, err := handleCLI(os.Args[1:]); handled {
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
 	logger, err := zap.NewProduction()
 	if err != nil {
 		panic(err)
@@ -52,7 +42,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("auth failed", zap.Error(err))
 	}
-	startCredentialExpiryWatcher(stop, cred, logger)
 	logger.Info("auth succeeded", zap.String("nodeType", cfg.Node.Type), zap.String("nodeName", cfg.Node.Name))
 
 	appLogger := zapAdapter{logger: logger}
@@ -78,26 +67,6 @@ func main() {
 	if err := consumer.Consume(ctx, handler); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Fatal("rabbitmq consumer stopped", zap.Error(err))
 	}
-}
-
-func startCredentialExpiryWatcher(stop context.CancelFunc, cred *auth.Credential, logger *zap.Logger) {
-	if cred == nil || cred.ExpireTime.IsZero() {
-		return
-	}
-	wait := time.Until(cred.ExpireTime)
-	if wait <= 0 {
-		stop()
-		return
-	}
-	go func() {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		<-timer.C
-		logger.Warn("credential expired, stopping judge node",
-			zap.String("nodeId", cred.NodeID),
-			zap.String("tokenId", cred.TokenID))
-		stop()
-	}()
 }
 
 func buildReporter(cfg config.Config, httpClient *http.Client, cred *auth.Credential, logger logging.Logger) reporter.Reporter {

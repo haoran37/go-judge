@@ -9,7 +9,6 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -55,49 +54,5 @@ func TestParseExpireTimeWithoutZone(t *testing.T) {
 	}
 	if got.Year() != 2026 || got.Month() != time.May || got.Day() != 12 || got.Hour() != 14 {
 		t.Fatalf("unexpected expire time: %v", got)
-	}
-}
-
-func TestTempTokenCacheRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "temp-token.json")
-	cache := TempTokenCache{
-		Token:      "jwt-value",
-		TokenType:  "Bearer",
-		NodeID:     "node-1",
-		TokenID:    "token-1",
-		ExpireTime: time.Now().Add(time.Hour).Format(time.RFC3339),
-	}
-	if err := SaveTempTokenCache(path, cache); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("unexpected cache permission: %v", info.Mode().Perm())
-	}
-	cred, err := LoadTempTokenCache(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cred.HeaderName != "Authorization" || cred.HeaderValue != "Bearer jwt-value" ||
-		cred.NodeID != "node-1" || cred.TokenID != "token-1" {
-		t.Fatalf("unexpected credential: %+v", cred)
-	}
-}
-
-func TestExpiredTempTokenCacheRejected(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "temp-token.json")
-	cache := TempTokenCache{
-		Token:      "jwt-value",
-		TokenType:  "Bearer",
-		ExpireTime: time.Now().Add(-time.Minute).Format(time.RFC3339),
-	}
-	if err := SaveTempTokenCache(path, cache); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadTempTokenCache(path); err == nil {
-		t.Fatal("expected expired temp token cache to be rejected")
 	}
 }
