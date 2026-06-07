@@ -28,9 +28,10 @@ type Config struct {
 }
 
 type NodeConfig struct {
-	Name           string `yaml:"name"`
-	Type           string `yaml:"type"`
-	MaxConcurrency int    `yaml:"maxConcurrency"`
+	Name                string   `yaml:"name"`
+	Type                string   `yaml:"type"`
+	MaxConcurrency      int      `yaml:"maxConcurrency"`
+	SupportedJudgeModes []string `yaml:"supportedJudgeModes"`
 }
 
 type HnieOJConfig struct {
@@ -141,9 +142,10 @@ func Load(path string) (*Config, error) {
 func defaultConfig() *Config {
 	return &Config{
 		Node: NodeConfig{
-			Name:           "judge-node-01",
-			Type:           "formal",
-			MaxConcurrency: 1,
+			Name:                "judge-node-01",
+			Type:                "formal",
+			MaxConcurrency:      1,
+			SupportedJudgeModes: []string{"default"},
 		},
 		HnieOJ: HnieOJConfig{
 			RequestTimeout: 30 * time.Second,
@@ -216,6 +218,11 @@ func (c *Config) Validate() error {
 	if c.Node.MaxConcurrency <= 0 {
 		return errors.New("node.maxConcurrency must be positive")
 	}
+	modes, err := normalizeJudgeModes(c.Node.SupportedJudgeModes)
+	if err != nil {
+		return err
+	}
+	c.Node.SupportedJudgeModes = modes
 	if c.HnieOJ.BaseURL == "" {
 		return errors.New("hnieoj.baseUrl is required")
 	}
@@ -253,6 +260,7 @@ func applyEnv(c *Config) {
 	setString(&c.Node.Name, "HNIEOJ_NODE_NAME")
 	setString(&c.Node.Type, "HNIEOJ_NODE_TYPE")
 	setInt(&c.Node.MaxConcurrency, "HNIEOJ_NODE_MAX_CONCURRENCY")
+	setStringSlice(&c.Node.SupportedJudgeModes, "HNIEOJ_NODE_SUPPORTED_JUDGE_MODES")
 	setString(&c.HnieOJ.BaseURL, "HNIEOJ_BASE_URL")
 	setDuration(&c.HnieOJ.RequestTimeout, "HNIEOJ_REQUEST_TIMEOUT")
 	setString(&c.HnieOJ.FormalToken.EncryptedToken, "HNIEOJ_FORMAL_ENCRYPTED_TOKEN")
@@ -331,9 +339,59 @@ func setDuration(dst *time.Duration, key string) {
 	}
 }
 
+func setStringSlice(dst *[]string, key string) {
+	if v := os.Getenv(key); v != "" {
+		*dst = splitCSV(v)
+	}
+}
+
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func normalizeJudgeModes(modes []string) ([]string, error) {
+	if len(modes) == 0 {
+		return []string{"default"}, nil
+	}
+	allowed := map[string]struct{}{
+		"default":     {},
+		"spj":         {},
+		"interactive": {},
+	}
+	seen := make(map[string]struct{}, len(modes))
+	out := make([]string, 0, len(modes))
+	for _, mode := range modes {
+		mode = strings.ToLower(strings.TrimSpace(mode))
+		if mode == "" {
+			continue
+		}
+		if _, ok := allowed[mode]; !ok {
+			return nil, fmt.Errorf("unsupported node.supportedJudgeModes value %q", mode)
+		}
+		if _, ok := seen[mode]; ok {
+			continue
+		}
+		seen[mode] = struct{}{}
+		out = append(out, mode)
+	}
+	if len(out) == 0 {
+		return []string{"default"}, nil
+	}
+	return out, nil
+}
+
 type remoteConfigOverlay struct {
 	Node struct {
-		MaxConcurrency *int `yaml:"maxConcurrency"`
+		MaxConcurrency      *int     `yaml:"maxConcurrency"`
+		SupportedJudgeModes []string `yaml:"supportedJudgeModes"`
 	} `yaml:"node"`
 	RabbitMQ struct {
 		Prefetch     *int           `yaml:"prefetch"`
@@ -403,6 +461,9 @@ func fetchNacosConfig(ctx context.Context, nacos NacosConfig) ([]byte, error) {
 func mergeRemoteConfig(cfg *Config, overlay remoteConfigOverlay) {
 	if overlay.Node.MaxConcurrency != nil {
 		cfg.Node.MaxConcurrency = *overlay.Node.MaxConcurrency
+	}
+	if overlay.Node.SupportedJudgeModes != nil {
+		cfg.Node.SupportedJudgeModes = overlay.Node.SupportedJudgeModes
 	}
 	if overlay.RabbitMQ.Prefetch != nil {
 		cfg.RabbitMQ.Prefetch = *overlay.RabbitMQ.Prefetch

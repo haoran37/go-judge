@@ -49,11 +49,11 @@ func main() {
 	testdataClient := testdata.New(cfg.HnieOJ.BaseURL, cfg.Testdata.CacheRoot, httpClient, cred, appLogger)
 	testdataClient.StartCleaner(ctx, cfg.Testdata.CleanupInterval, cfg.Testdata.MaxCacheBytes, cfg.Testdata.MaxUnusedDuration)
 	runnerClient := runner.New(cfg.GoJudge.Endpoint, cfg.GoJudge.AuthToken, httpClient, appLogger)
-	proc := processor.New(testdataClient, runnerClient, rep, cred, appLogger)
+	proc := processor.New(testdataClient, runnerClient, rep, cred, appLogger, cfg.Node.SupportedJudgeModes)
 
 	var running atomic.Int64
 	heartbeat.New(*cfg, cred, httpClient, appLogger, &running).Start(ctx)
-	logger.Info("node started", zap.String("nodeName", cfg.Node.Name), zap.String("nodeType", cfg.Node.Type), zap.Int("maxConcurrency", cfg.Node.MaxConcurrency))
+	logger.Info("node started", zap.String("nodeName", cfg.Node.Name), zap.String("nodeType", cfg.Node.Type), zap.Int("maxConcurrency", cfg.Node.MaxConcurrency), zap.Strings("supportedJudgeModes", cfg.Node.SupportedJudgeModes))
 
 	handler := limitedHandler(cfg.Node.MaxConcurrency, &running, proc.Process)
 	if fixturePath != "" {

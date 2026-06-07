@@ -36,7 +36,7 @@ func TestSendHeartbeatPayload(t *testing.T) {
 	var running atomic.Int64
 	running.Store(2)
 	cfg := config.Config{
-		Node:      config.NodeConfig{Name: "node-1", Type: "formal", MaxConcurrency: 4},
+		Node:      config.NodeConfig{Name: "node-1", Type: "formal", MaxConcurrency: 4, SupportedJudgeModes: []string{"default", "spj"}},
 		HnieOJ:    config.HnieOJConfig{BaseURL: server.URL},
 		Testdata:  config.TestdataConfig{CacheRoot: t.TempDir(), StatsInterval: time.Minute},
 		Heartbeat: config.HeartbeatConfig{Endpoint: "/heartbeat"},
@@ -58,5 +58,8 @@ func TestSendHeartbeatPayload(t *testing.T) {
 	}
 	if got.payload.NodeID != "node-id" || got.payload.NodeName != "node-1" || got.payload.RunningTasks != 2 || got.payload.MaxConcurrency != 4 {
 		t.Fatalf("unexpected payload: %+v", got.payload)
+	}
+	if len(got.payload.SupportedJudgeModes) != 2 || got.payload.SupportedJudgeModes[1] != "spj" {
+		t.Fatalf("supported judge modes = %#v", got.payload.SupportedJudgeModes)
 	}
 }

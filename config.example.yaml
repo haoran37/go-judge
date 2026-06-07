@@ -2,6 +2,8 @@ node:
   name: judge-node-01
   type: formal
   maxConcurrency: 4
+  supportedJudgeModes:
+    - default
 
 # 可选：从 Nacos 加载判题节点运行参数。
 # 建议只在远程配置中放非敏感、可统一调整的参数，例如缓存清理、心跳间隔、MQ 重试。

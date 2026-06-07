@@ -50,3 +50,54 @@ func TestJavaSpecPackagesClassFilesAsJar(t *testing.T) {
 		t.Fatalf("unexpected java run args: %#v", spec.RunArgs)
 	}
 }
+
+func TestParseResultJSON(t *testing.T) {
+	score := 7
+	parsed, err := parseResultJSON(`{"status":"partially_correct","score":7,"message":"partial","diagnosticMessage":"detail"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.status != model.StatusWrongAnswer || parsed.score == nil || *parsed.score != score || parsed.message != "partial" || parsed.diagnosticMessage != "detail" {
+		t.Fatalf("unexpected parsed result: %+v", parsed)
+	}
+	if _, err := parseResultJSON(`{"status":"unknown"}`); err == nil {
+		t.Fatal("expected unsupported status error")
+	}
+}
+
+func TestRenderArguments(t *testing.T) {
+	got, err := renderArguments(`"{input}" {expected} {actual} {result}`, "", map[string]string{
+		"input":    "in file.txt",
+		"expected": "expected.txt",
+		"actual":   "actual.txt",
+		"result":   "result.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"in file.txt", "expected.txt", "actual.txt", "result.json"}
+	if len(got) != len(want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestSpecialResultFromInvalidJSONIsJudgementFailed(t *testing.T) {
+	got, err := specialResultFromRun(runResult{
+		Status: "Accepted",
+		Files: map[string]string{
+			resultFile: "{",
+			stderrFile: "checker stderr",
+		},
+	}, "checker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusJudgementFailed || got.DiagnosticMessage == "" {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+}

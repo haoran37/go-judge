@@ -11,6 +11,7 @@ func TestMergeRemoteConfig(t *testing.T) {
 	body := []byte(`
 node:
   maxConcurrency: 3
+  supportedJudgeModes: ["default", "spj"]
 rabbitmq:
   prefetch: 3
   maxRetries: 5
@@ -43,5 +44,27 @@ heartbeat:
 	}
 	if !cfg.Heartbeat.Enabled || cfg.Heartbeat.Interval != 20*time.Second {
 		t.Fatalf("unexpected heartbeat config: %+v", cfg.Heartbeat)
+	}
+	if len(cfg.Node.SupportedJudgeModes) != 2 || cfg.Node.SupportedJudgeModes[1] != "spj" {
+		t.Fatalf("unexpected supported judge modes: %#v", cfg.Node.SupportedJudgeModes)
+	}
+}
+
+func TestNormalizeJudgeModes(t *testing.T) {
+	got, err := normalizeJudgeModes([]string{" default ", "SPJ", "spj", "interactive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"default", "spj", "interactive"}
+	if len(got) != len(want) {
+		t.Fatalf("modes = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("modes = %#v, want %#v", got, want)
+		}
+	}
+	if _, err := normalizeJudgeModes([]string{"unsafe"}); err == nil {
+		t.Fatal("expected unsupported mode error")
 	}
 }
