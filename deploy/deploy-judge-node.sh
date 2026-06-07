@@ -35,12 +35,21 @@ yaml_quote() {
   printf '"%s"' "${value}"
 }
 
+read_line() {
+  local variable_name="$1"
+  if [[ -t 0 ]]; then
+    IFS= read -r -e "${variable_name}"
+  else
+    IFS= read -r "${variable_name}"
+  fi
+}
+
 prompt() {
   local label="$1"
   local default_value="$2"
   local value
   printf '%s [%s]: ' "${label}" "${default_value}" >&2
-  read -r value
+  read_line value
   if [[ -z "${value}" ]]; then
     printf '%s' "${default_value}"
   else
@@ -53,7 +62,7 @@ prompt_required() {
   local value
   while true; do
     printf '%s: ' "${label}" >&2
-    read -r value
+    read_line value
     if [[ -n "${value}" ]]; then
       printf '%s' "${value}"
       return
@@ -237,7 +246,7 @@ configure_interactive() {
     formal_token_group="$(prompt "正式 Token Nacos Group" "HNIEOJ_SECRET_GROUP")"
     formal_token_data_id="$(prompt "正式 Token Nacos Data ID" "hnieoj-judge-formal-token.yaml")"
   else
-    auth_code="$(prompt_secret_required "临时节点授权码")"
+    auth_code="$(prompt_required "临时节点授权码")"
   fi
 
   write_common_config "${node_name}" "${node_type}" "${max_concurrency}" "${backend_url}" \
@@ -299,7 +308,7 @@ deploy() {
   else
     local answer
     printf '发现已有配置 %s，是否重新交互生成？[y/N]: ' "${CONFIG_FILE}"
-    read -r answer
+    read_line answer
     case "${answer}" in
       y|Y|yes|YES) configure_interactive ;;
       *) log "使用已有配置：${CONFIG_FILE}" ;;
