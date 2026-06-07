@@ -47,6 +47,7 @@ func main() {
 	appLogger := zapAdapter{logger: logger}
 	rep := buildReporter(*cfg, httpClient, cred, appLogger)
 	testdataClient := testdata.New(cfg.HnieOJ.BaseURL, cfg.Testdata.CacheRoot, httpClient, cred, appLogger)
+	testdataClient.StartCleaner(ctx, cfg.Testdata.CleanupInterval, cfg.Testdata.MaxCacheBytes, cfg.Testdata.MaxUnusedDuration)
 	runnerClient := runner.New(cfg.GoJudge.Endpoint, cfg.GoJudge.AuthToken, httpClient, appLogger)
 	proc := processor.New(testdataClient, runnerClient, rep, cred, appLogger)
 

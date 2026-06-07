@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,22 +19,31 @@ import (
 
 const Version = "hnieoj-go-judge-0.1.0"
 
+const defaultCacheStatsInterval = 5 * time.Minute
+
 type Client struct {
-	cfg        config.Config
-	cred       *auth.Credential
-	httpClient *http.Client
-	logger     logging.Logger
-	running    *atomic.Int64
+	cfg          config.Config
+	cred         *auth.Credential
+	httpClient   *http.Client
+	logger       logging.Logger
+	running      *atomic.Int64
+	cacheMu      sync.Mutex
+	cacheStats   CacheStats
+	cacheStatsAt time.Time
 }
 
 type Payload struct {
-	NodeID         string `json:"nodeId"`
-	NodeName       string `json:"nodeName"`
-	NodeType       string `json:"nodeType"`
-	MaxConcurrency int    `json:"maxConcurrency"`
-	RunningTasks   int64  `json:"runningTasks"`
-	CPUCore        int    `json:"cpuCore"`
-	Version        string `json:"version"`
+	NodeID            string `json:"nodeId"`
+	NodeName          string `json:"nodeName"`
+	NodeType          string `json:"nodeType"`
+	MaxConcurrency    int    `json:"maxConcurrency"`
+	RunningTasks      int64  `json:"runningTasks"`
+	CPUCore           int    `json:"cpuCore"`
+	Version           string `json:"version"`
+	CacheUsedBytes    int64  `json:"cacheUsedBytes"`
+	CacheProblemCount int    `json:"cacheProblemCount"`
+	DiskTotalBytes    int64  `json:"diskTotalBytes"`
+	DiskFreeBytes     int64  `json:"diskFreeBytes"`
 }
 
 func New(cfg config.Config, cred *auth.Credential, httpClient *http.Client, logger logging.Logger, running *atomic.Int64) *Client {
@@ -69,14 +79,19 @@ func (c *Client) Send(ctx context.Context) error {
 	if nodeID == "" {
 		nodeID = c.cfg.Node.Name
 	}
+	cacheStats := c.cacheStatsSnapshot()
 	body, err := json.Marshal(Payload{
-		NodeID:         nodeID,
-		NodeName:       c.cfg.Node.Name,
-		NodeType:       c.cfg.Node.Type,
-		MaxConcurrency: c.cfg.Node.MaxConcurrency,
-		RunningTasks:   c.running.Load(),
-		CPUCore:        runtime.NumCPU(),
-		Version:        Version,
+		NodeID:            nodeID,
+		NodeName:          c.cfg.Node.Name,
+		NodeType:          c.cfg.Node.Type,
+		MaxConcurrency:    c.cfg.Node.MaxConcurrency,
+		RunningTasks:      c.running.Load(),
+		CPUCore:           runtime.NumCPU(),
+		Version:           Version,
+		CacheUsedBytes:    cacheStats.CacheUsedBytes,
+		CacheProblemCount: cacheStats.CacheProblemCount,
+		DiskTotalBytes:    cacheStats.DiskTotalBytes,
+		DiskFreeBytes:     cacheStats.DiskFreeBytes,
 	})
 	if err != nil {
 		return err
@@ -101,6 +116,21 @@ func (c *Client) Send(ctx context.Context) error {
 	}
 	c.logger.Info("heartbeat succeeded")
 	return nil
+}
+
+func (c *Client) cacheStatsSnapshot() CacheStats {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	interval := c.cfg.Testdata.StatsInterval
+	if interval <= 0 {
+		interval = defaultCacheStatsInterval
+	}
+	if !c.cacheStatsAt.IsZero() && time.Since(c.cacheStatsAt) < interval {
+		return c.cacheStats
+	}
+	c.cacheStats = collectCacheStats(c.cfg.Testdata.CacheRoot)
+	c.cacheStatsAt = time.Now()
+	return c.cacheStats
 }
 
 type statusError struct {

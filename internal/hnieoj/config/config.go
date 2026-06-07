@@ -1,11 +1,16 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -19,6 +24,7 @@ type Config struct {
 	GoJudge   GoJudgeConfig   `yaml:"gojudge"`
 	Reporter  ReporterConfig  `yaml:"reporter"`
 	Heartbeat HeartbeatConfig `yaml:"heartbeat"`
+	Remote    RemoteConfig    `yaml:"remoteConfig"`
 }
 
 type NodeConfig struct {
@@ -71,7 +77,11 @@ type RabbitMQConfig struct {
 }
 
 type TestdataConfig struct {
-	CacheRoot string `yaml:"cacheRoot"`
+	CacheRoot         string        `yaml:"cacheRoot"`
+	MaxCacheBytes     int64         `yaml:"maxCacheBytes"`
+	MaxUnusedDuration time.Duration `yaml:"maxUnusedDuration"`
+	CleanupInterval   time.Duration `yaml:"cleanupInterval"`
+	StatsInterval     time.Duration `yaml:"statsInterval"`
 }
 
 type GoJudgeConfig struct {
@@ -88,6 +98,11 @@ type HeartbeatConfig struct {
 	Enabled  bool          `yaml:"enabled"`
 	Endpoint string        `yaml:"endpoint"`
 	Interval time.Duration `yaml:"interval"`
+}
+
+type RemoteConfig struct {
+	Enabled bool        `yaml:"enabled"`
+	Nacos   NacosConfig `yaml:"nacos"`
 }
 
 func LoadFromArgs() (*Config, string, error) {
@@ -114,6 +129,10 @@ func Load(path string) (*Config, error) {
 		if err := yaml.Unmarshal(b, cfg); err != nil {
 			return nil, err
 		}
+	}
+	applyEnv(cfg)
+	if err := applyRemoteConfig(context.Background(), cfg); err != nil {
+		return nil, err
 	}
 	applyEnv(cfg)
 	return cfg, cfg.Validate()
@@ -157,7 +176,11 @@ func defaultConfig() *Config {
 			RetryBackoff:         10 * time.Second,
 		},
 		Testdata: TestdataConfig{
-			CacheRoot: "/data/oj/judge-cache",
+			CacheRoot:         "/data/oj/judge-cache",
+			MaxCacheBytes:     20 * 1024 * 1024 * 1024,
+			MaxUnusedDuration: 72 * time.Hour,
+			CleanupInterval:   time.Hour,
+			StatsInterval:     5 * time.Minute,
 		},
 		GoJudge: GoJudgeConfig{
 			Endpoint: "http://127.0.0.1:5050",
@@ -170,6 +193,15 @@ func defaultConfig() *Config {
 			Enabled:  false,
 			Endpoint: "/judge/nodes/heartbeat",
 			Interval: 30 * time.Second,
+		},
+		Remote: RemoteConfig{
+			Enabled: false,
+			Nacos: NacosConfig{
+				ServerAddr: "http://127.0.0.1:8848",
+				Namespace:  "dev",
+				Group:      "HNIEOJ_JUDGE_GROUP",
+				DataID:     "hnieoj-judge-node.yaml",
+			},
 		},
 	}
 }
@@ -192,6 +224,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Testdata.CacheRoot == "" {
 		return errors.New("testdata.cacheRoot is required")
+	}
+	if c.Testdata.MaxCacheBytes < 0 {
+		return errors.New("testdata.maxCacheBytes must not be negative")
+	}
+	if c.Testdata.MaxUnusedDuration < 0 {
+		return errors.New("testdata.maxUnusedDuration must not be negative")
+	}
+	if c.Testdata.CleanupInterval <= 0 {
+		c.Testdata.CleanupInterval = time.Hour
+	}
+	if c.Testdata.StatsInterval <= 0 {
+		c.Testdata.StatsInterval = 5 * time.Minute
 	}
 	if c.RabbitMQ.Prefetch <= 0 {
 		c.RabbitMQ.Prefetch = c.Node.MaxConcurrency
@@ -234,10 +278,19 @@ func applyEnv(c *Config) {
 	setInt(&c.RabbitMQ.MaxRetries, "HNIEOJ_RABBITMQ_MAX_RETRIES")
 	setDuration(&c.RabbitMQ.RetryBackoff, "HNIEOJ_RABBITMQ_RETRY_BACKOFF")
 	setString(&c.Testdata.CacheRoot, "HNIEOJ_TESTDATA_CACHE_ROOT")
+	setInt64(&c.Testdata.MaxCacheBytes, "HNIEOJ_TESTDATA_MAX_CACHE_BYTES")
+	setDuration(&c.Testdata.MaxUnusedDuration, "HNIEOJ_TESTDATA_MAX_UNUSED_DURATION")
+	setDuration(&c.Testdata.CleanupInterval, "HNIEOJ_TESTDATA_CLEANUP_INTERVAL")
+	setDuration(&c.Testdata.StatsInterval, "HNIEOJ_TESTDATA_STATS_INTERVAL")
 	setString(&c.GoJudge.Endpoint, "HNIEOJ_GOJUDGE_ENDPOINT")
 	setString(&c.GoJudge.AuthToken, "HNIEOJ_GOJUDGE_AUTH_TOKEN")
 	setString(&c.Reporter.Mode, "HNIEOJ_REPORTER_MODE")
 	setString(&c.Reporter.Endpoint, "HNIEOJ_REPORTER_ENDPOINT")
+	setBool(&c.Remote.Enabled, "HNIEOJ_REMOTE_CONFIG_ENABLED")
+	setString(&c.Remote.Nacos.ServerAddr, "HNIEOJ_REMOTE_CONFIG_NACOS_SERVER_ADDR")
+	setString(&c.Remote.Nacos.Namespace, "HNIEOJ_REMOTE_CONFIG_NACOS_NAMESPACE")
+	setString(&c.Remote.Nacos.Group, "HNIEOJ_REMOTE_CONFIG_NACOS_GROUP")
+	setString(&c.Remote.Nacos.DataID, "HNIEOJ_REMOTE_CONFIG_NACOS_DATA_ID")
 }
 
 func setString(dst *string, key string) {
@@ -254,10 +307,131 @@ func setInt(dst *int, key string) {
 	}
 }
 
+func setInt64(dst *int64, key string) {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			*dst = n
+		}
+	}
+}
+
+func setBool(dst *bool, key string) {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			*dst = b
+		}
+	}
+}
+
 func setDuration(dst *time.Duration, key string) {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			*dst = d
 		}
+	}
+}
+
+type remoteConfigOverlay struct {
+	Node struct {
+		MaxConcurrency *int `yaml:"maxConcurrency"`
+	} `yaml:"node"`
+	RabbitMQ struct {
+		Prefetch     *int           `yaml:"prefetch"`
+		MaxRetries   *int           `yaml:"maxRetries"`
+		RetryBackoff *time.Duration `yaml:"retryBackoff"`
+	} `yaml:"rabbitmq"`
+	Testdata struct {
+		MaxCacheBytes     *int64         `yaml:"maxCacheBytes"`
+		MaxUnusedDuration *time.Duration `yaml:"maxUnusedDuration"`
+		CleanupInterval   *time.Duration `yaml:"cleanupInterval"`
+		StatsInterval     *time.Duration `yaml:"statsInterval"`
+	} `yaml:"testdata"`
+	Heartbeat struct {
+		Enabled  *bool          `yaml:"enabled"`
+		Endpoint *string        `yaml:"endpoint"`
+		Interval *time.Duration `yaml:"interval"`
+	} `yaml:"heartbeat"`
+}
+
+func applyRemoteConfig(ctx context.Context, cfg *Config) error {
+	if !cfg.Remote.Enabled {
+		return nil
+	}
+	if cfg.Remote.Nacos.ServerAddr == "" || cfg.Remote.Nacos.Group == "" || cfg.Remote.Nacos.DataID == "" {
+		return errors.New("remote config nacos settings are required")
+	}
+	body, err := fetchNacosConfig(ctx, cfg.Remote.Nacos)
+	if err != nil {
+		return err
+	}
+	var overlay remoteConfigOverlay
+	if err := yaml.Unmarshal(body, &overlay); err != nil {
+		return err
+	}
+	mergeRemoteConfig(cfg, overlay)
+	return nil
+}
+
+func fetchNacosConfig(ctx context.Context, nacos NacosConfig) ([]byte, error) {
+	baseURL := strings.TrimRight(nacos.ServerAddr, "/")
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
+	values := url.Values{}
+	values.Set("dataId", nacos.DataID)
+	values.Set("group", nacos.Group)
+	if nacos.Namespace != "" {
+		values.Set("tenant", nacos.Namespace)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/nacos/v1/cs/configs?"+values.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetch remote config from nacos failed with status %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func mergeRemoteConfig(cfg *Config, overlay remoteConfigOverlay) {
+	if overlay.Node.MaxConcurrency != nil {
+		cfg.Node.MaxConcurrency = *overlay.Node.MaxConcurrency
+	}
+	if overlay.RabbitMQ.Prefetch != nil {
+		cfg.RabbitMQ.Prefetch = *overlay.RabbitMQ.Prefetch
+	}
+	if overlay.RabbitMQ.MaxRetries != nil {
+		cfg.RabbitMQ.MaxRetries = *overlay.RabbitMQ.MaxRetries
+	}
+	if overlay.RabbitMQ.RetryBackoff != nil {
+		cfg.RabbitMQ.RetryBackoff = *overlay.RabbitMQ.RetryBackoff
+	}
+	if overlay.Testdata.MaxCacheBytes != nil {
+		cfg.Testdata.MaxCacheBytes = *overlay.Testdata.MaxCacheBytes
+	}
+	if overlay.Testdata.MaxUnusedDuration != nil {
+		cfg.Testdata.MaxUnusedDuration = *overlay.Testdata.MaxUnusedDuration
+	}
+	if overlay.Testdata.CleanupInterval != nil {
+		cfg.Testdata.CleanupInterval = *overlay.Testdata.CleanupInterval
+	}
+	if overlay.Testdata.StatsInterval != nil {
+		cfg.Testdata.StatsInterval = *overlay.Testdata.StatsInterval
+	}
+	if overlay.Heartbeat.Enabled != nil {
+		cfg.Heartbeat.Enabled = *overlay.Heartbeat.Enabled
+	}
+	if overlay.Heartbeat.Endpoint != nil {
+		cfg.Heartbeat.Endpoint = *overlay.Heartbeat.Endpoint
+	}
+	if overlay.Heartbeat.Interval != nil {
+		cfg.Heartbeat.Interval = *overlay.Heartbeat.Interval
 	}
 }

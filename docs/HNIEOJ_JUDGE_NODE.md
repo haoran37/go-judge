@@ -132,7 +132,25 @@ Heartbeat endpoint:
 POST /judge/nodes/heartbeat
 ```
 
-Formal deployment examples enable heartbeat by default. The backend uses it to maintain node online status, current running task count, max concurrency, CPU cores, and judge node version.
+Formal deployment examples enable heartbeat by default. The backend uses it to maintain node online status, current running task count, max concurrency, CPU cores, judge node version, testdata cache usage, cached problem count, and free disk space of the cache mount. Cache and disk stats are sampled about every 5 minutes to avoid scanning the cache directory on every heartbeat.
+
+## Runtime Config
+
+Formal deployment examples can load non-sensitive runtime settings from Nacos:
+
+```yaml
+remoteConfig:
+  enabled: true
+  nacos:
+    serverAddr: "http://106.54.177.244:8848"
+    namespace: "dev"
+    group: "HNIEOJ_JUDGE_GROUP"
+    dataId: "hnieoj-judge-node.yaml"
+```
+
+Use this remote config for shared operational settings such as `testdata.maxCacheBytes`, `testdata.maxUnusedDuration`, `testdata.cleanupInterval`, `testdata.statsInterval`, `heartbeat.interval`, and RabbitMQ retry/prefetch values. Do not put node names, private key paths, RabbitMQ passwords, temp auth codes, or other node-private/sensitive values in this file.
+
+The testdata cleaner removes cached problem data that has not been used for `maxUnusedDuration`, then evicts the least recently used cached problems until total cache usage is below `maxCacheBytes`. Set either value to `0` to disable that cleanup condition.
 
 ## Validation Checklist
 

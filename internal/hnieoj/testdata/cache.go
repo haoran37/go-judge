@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/criyle/go-judge/internal/hnieoj/logging"
 	"github.com/criyle/go-judge/internal/hnieoj/model"
@@ -38,6 +40,7 @@ type Client struct {
 	httpClient *http.Client
 	cred       Credential
 	logger     logging.Logger
+	mu         sync.Mutex
 }
 
 func New(baseURL, cacheRoot string, httpClient *http.Client, cred Credential, logger logging.Logger) *Client {
@@ -51,6 +54,9 @@ func New(baseURL, cacheRoot string, httpClient *http.Client, cred Credential, lo
 }
 
 func (c *Client) Ensure(ctx context.Context, problemID, expectedVersion int64) ([]model.Case, int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	problemRoot := filepath.Join(c.cacheRoot, "problems", strconv.FormatInt(problemID, 10))
 	testdataDir := filepath.Join(problemRoot, "testdata")
 	versionFile := filepath.Join(problemRoot, "data-version")
@@ -95,7 +101,43 @@ func (c *Client) Ensure(ctx context.Context, problemID, expectedVersion int64) (
 	if err != nil {
 		return nil, 0, ErrPermanent{Err: err}
 	}
+	touchLastUsed(problemRoot)
 	return cases, remoteVersion, nil
+}
+
+func (c *Client) StartCleaner(ctx context.Context, interval time.Duration, maxCacheBytes int64, maxUnusedDuration time.Duration) {
+	if maxCacheBytes <= 0 && maxUnusedDuration <= 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	go func() {
+		c.cleanup(maxCacheBytes, maxUnusedDuration)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.cleanup(maxCacheBytes, maxUnusedDuration)
+			}
+		}
+	}()
+}
+
+func (c *Client) cleanup(maxCacheBytes int64, maxUnusedDuration time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	removed, freed, err := cleanupCache(c.cacheRoot, maxCacheBytes, maxUnusedDuration)
+	if err != nil {
+		c.logger.Warn("testdata cache cleanup failed", logging.Error(err))
+		return
+	}
+	if removed > 0 {
+		c.logger.Info("testdata cache cleanup completed", logging.Int("removedProblems", removed), logging.Int64("freedBytes", freed))
+	}
 }
 
 func isZipResponse(contentType string) bool {

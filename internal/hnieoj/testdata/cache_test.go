@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadCasesSortedPairsOnly(t *testing.T) {
@@ -44,8 +45,40 @@ func TestUnzipSafeExtractsPlainFiles(t *testing.T) {
 	}
 }
 
+func TestCleanupCacheRemovesExpiredProblem(t *testing.T) {
+	cacheRoot := t.TempDir()
+	oldProblemRoot := filepath.Join(cacheRoot, "problems", "1001")
+	newProblemRoot := filepath.Join(cacheRoot, "problems", "1002")
+	writeFile(t, filepath.Join(oldProblemRoot, "testdata", "1.in"), "old")
+	writeFile(t, filepath.Join(newProblemRoot, "testdata", "1.in"), "new")
+
+	oldTime := time.Now().Add(-48 * time.Hour)
+	writeFile(t, filepath.Join(oldProblemRoot, lastUsedFileName), oldTime.Format(time.RFC3339))
+	if err := os.Chtimes(filepath.Join(oldProblemRoot, lastUsedFileName), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	touchLastUsed(newProblemRoot)
+
+	removed, _, err := cleanupCache(cacheRoot, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("cleanupCache error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("unexpected removed count: %d", removed)
+	}
+	if _, err := os.Stat(oldProblemRoot); !os.IsNotExist(err) {
+		t.Fatalf("expected old problem removed, stat err: %v", err)
+	}
+	if _, err := os.Stat(newProblemRoot); err != nil {
+		t.Fatalf("expected new problem kept: %v", err)
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

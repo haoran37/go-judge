@@ -3,6 +3,17 @@ node:
   type: formal
   maxConcurrency: 2
 
+# 可选：从 Nacos 加载判题节点运行参数。
+# 建议只在远程配置中放非敏感、可统一调整的参数，例如缓存清理、心跳间隔、MQ 重试。
+# 私钥路径、RabbitMQ 密码、节点名称等仍建议保留在本地配置或环境变量中。
+remoteConfig:
+  enabled: true
+  nacos:
+    serverAddr: "http://106.54.177.244:8848"
+    namespace: "dev"
+    group: "HNIEOJ_JUDGE_GROUP"
+    dataId: "hnieoj-judge-node.yaml"
+
 hnieoj:
   baseUrl: "http://gateway:8800"
   requestTimeout: "30s"
@@ -35,7 +46,16 @@ rabbitmq:
   retryBackoff: "10s"
 
 testdata:
+  # 判题节点本地测试数据缓存目录，属于节点本地路径，不建议放入统一 Nacos 配置。
   cacheRoot: "/data/oj/judge-cache"
+  # 测试数据缓存最大占用字节数，0 表示不按容量清理。
+  maxCacheBytes: 21474836480
+  # 测试数据多久未使用后可被清理，0 表示不按时间清理。
+  maxUnusedDuration: "72h"
+  # 缓存清理任务执行间隔。
+  cleanupInterval: "1h"
+  # 缓存与磁盘统计采样间隔，心跳会复用最近一次采样值。
+  statsInterval: "5m"
 
 gojudge:
   endpoint: "http://go-judge-sandbox:5050"
