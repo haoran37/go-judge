@@ -35,10 +35,10 @@ type HnieOJConfig struct {
 }
 
 type FormalToken struct {
-	EncryptedToken  string `yaml:"encryptedToken"`
-	PrivateKeyPath  string `yaml:"privateKeyPath"`
-	CipherAlgorithm string `yaml:"cipherAlgorithm"`
-	Nacos           NacosConfig `yaml:"nacos"`
+	EncryptedToken  string        `yaml:"encryptedToken"`
+	PrivateKeyPath  string        `yaml:"privateKeyPath"`
+	CipherAlgorithm string        `yaml:"cipherAlgorithm"`
+	Nacos           NacosConfig   `yaml:"nacos"`
 	RefreshInterval time.Duration `yaml:"refreshInterval"`
 }
 
@@ -54,18 +54,20 @@ type TempToken struct {
 }
 
 type RabbitMQConfig struct {
-	Host                 string `yaml:"host"`
-	Port                 int    `yaml:"port"`
-	Username             string `yaml:"username"`
-	Password             string `yaml:"password"`
-	VirtualHost          string `yaml:"virtualHost"`
-	Exchange             string `yaml:"exchange"`
-	Queue                string `yaml:"queue"`
-	RoutingKey           string `yaml:"routingKey"`
-	DeadLetterExchange   string `yaml:"deadLetterExchange"`
-	DeadLetterQueue      string `yaml:"deadLetterQueue"`
-	DeadLetterRoutingKey string `yaml:"deadLetterRoutingKey"`
-	Prefetch             int    `yaml:"prefetch"`
+	Host                 string        `yaml:"host"`
+	Port                 int           `yaml:"port"`
+	Username             string        `yaml:"username"`
+	Password             string        `yaml:"password"`
+	VirtualHost          string        `yaml:"virtualHost"`
+	Exchange             string        `yaml:"exchange"`
+	Queue                string        `yaml:"queue"`
+	RoutingKey           string        `yaml:"routingKey"`
+	DeadLetterExchange   string        `yaml:"deadLetterExchange"`
+	DeadLetterQueue      string        `yaml:"deadLetterQueue"`
+	DeadLetterRoutingKey string        `yaml:"deadLetterRoutingKey"`
+	Prefetch             int           `yaml:"prefetch"`
+	MaxRetries           int           `yaml:"maxRetries"`
+	RetryBackoff         time.Duration `yaml:"retryBackoff"`
 }
 
 type TestdataConfig struct {
@@ -151,6 +153,8 @@ func defaultConfig() *Config {
 			DeadLetterQueue:      "hnieoj.judge.task.dlq",
 			DeadLetterRoutingKey: "judge.submission.created.dlq",
 			Prefetch:             1,
+			MaxRetries:           3,
+			RetryBackoff:         10 * time.Second,
 		},
 		Testdata: TestdataConfig{
 			CacheRoot: "/data/oj/judge-cache",
@@ -192,6 +196,12 @@ func (c *Config) Validate() error {
 	if c.RabbitMQ.Prefetch <= 0 {
 		c.RabbitMQ.Prefetch = c.Node.MaxConcurrency
 	}
+	if c.RabbitMQ.MaxRetries < 0 {
+		c.RabbitMQ.MaxRetries = 0
+	}
+	if c.RabbitMQ.RetryBackoff <= 0 {
+		c.RabbitMQ.RetryBackoff = 10 * time.Second
+	}
 	return nil
 }
 
@@ -221,6 +231,8 @@ func applyEnv(c *Config) {
 	setString(&c.RabbitMQ.DeadLetterQueue, "HNIEOJ_RABBITMQ_DLQ")
 	setString(&c.RabbitMQ.DeadLetterRoutingKey, "HNIEOJ_RABBITMQ_DLX_ROUTING_KEY")
 	setInt(&c.RabbitMQ.Prefetch, "HNIEOJ_RABBITMQ_PREFETCH")
+	setInt(&c.RabbitMQ.MaxRetries, "HNIEOJ_RABBITMQ_MAX_RETRIES")
+	setDuration(&c.RabbitMQ.RetryBackoff, "HNIEOJ_RABBITMQ_RETRY_BACKOFF")
 	setString(&c.Testdata.CacheRoot, "HNIEOJ_TESTDATA_CACHE_ROOT")
 	setString(&c.GoJudge.Endpoint, "HNIEOJ_GOJUDGE_ENDPOINT")
 	setString(&c.GoJudge.AuthToken, "HNIEOJ_GOJUDGE_AUTH_TOKEN")

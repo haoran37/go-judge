@@ -34,11 +34,11 @@ func TestDecryptFormalToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	encryptedToken := "{rsa}" + base64.StdEncoding.EncodeToString(cipherText)
 	got, err := decryptFormalToken(config.FormalToken{
-		EncryptedToken:  "{rsa}" + base64.StdEncoding.EncodeToString(cipherText),
 		PrivateKeyPath:  keyPath,
 		CipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding",
-	})
+	}, encryptedToken)
 	if err != nil {
 		t.Fatal(err)
 	}

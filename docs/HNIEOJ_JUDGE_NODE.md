@@ -89,6 +89,7 @@ RabbitMQ must publish JSON tasks to:
 - Dead letter queue: `hnieoj.judge.task.dlq`
 - Dead letter routing key: `judge.submission.created.dlq`
 - ACK mode: manual
+- Retry policy: retryable errors are republished to the task exchange with header `x-hnieoj-retry-count`; after `rabbitmq.maxRetries` the original message is rejected without requeue and enters the DLQ.
 
 Task body must follow the documented submission contract and include `submissionId`, `judgeId`, `problemId`, `language`, `code`, resource limits, `dataVersion`, and judge flags.
 

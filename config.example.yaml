@@ -31,6 +31,8 @@ rabbitmq:
   deadLetterQueue: "hnieoj.judge.task.dlq"
   deadLetterRoutingKey: "judge.submission.created.dlq"
   prefetch: 4
+  maxRetries: 3
+  retryBackoff: "10s"
 
 testdata:
   cacheRoot: "/data/oj/judge-cache"
