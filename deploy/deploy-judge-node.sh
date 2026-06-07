@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+IFS=$'\n\t'
 
 IMAGE="${IMAGE:-hnieoj/go-judge:dev}"
 PROJECT_NAME="${PROJECT_NAME:-hnieoj-judge-node}"
@@ -7,10 +8,14 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/hnieoj/go-judge}"
 SECURITY_DIR="${SECURITY_DIR:-/etc/hnieoj/judge-security}"
 CACHE_DIR="${CACHE_DIR:-/data/oj/judge-cache}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.yaml}"
-COMPOSE_FILE="${COMPOSE_FILE:-${CONFIG_DIR}/docker-compose.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-${CONFIG_DIR}/compose.yaml}"
 PRIVATE_KEY_FILE="${PRIVATE_KEY_FILE:-${SECURITY_DIR}/judge_formal_private.pem}"
-GOJUDGE_PUBLIC_PORT="${GOJUDGE_PUBLIC_PORT:-5050}"
+
 GOJUDGE_SHM_SIZE="${GOJUDGE_SHM_SIZE:-512m}"
+GOJUDGE_FILE_TIMEOUT="${GOJUDGE_FILE_TIMEOUT:-30m}"
+PUBLISH_GOJUDGE="${PUBLISH_GOJUDGE:-false}"
+GOJUDGE_BIND_ADDR="${GOJUDGE_BIND_ADDR:-127.0.0.1}"
+GOJUDGE_PUBLIC_PORT="${GOJUDGE_PUBLIC_PORT:-5050}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -19,29 +24,33 @@ log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*"
 }
 
+warn() {
+  printf 'Warning: %s\n' "$*" >&2
+}
+
 fail() {
   printf 'Error: %s\n' "$*" >&2
   exit 1
 }
 
 require_command() {
-  command -v "$1" >/dev/null 2>&1 || fail "缺少命令：$1"
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
 }
 
-yaml_quote() {
-  local value="${1:-}"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '"%s"' "${value}"
+docker_compose() {
+  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
+}
+
+is_true() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 read_line() {
   local variable_name="$1"
-  if [[ -t 0 ]]; then
-    IFS= read -r -e "${variable_name}"
-  else
-    IFS= read -r "${variable_name}"
-  fi
+  IFS= read -r "${variable_name}"
 }
 
 prompt() {
@@ -67,7 +76,7 @@ prompt_required() {
       printf '%s' "${value}"
       return
     fi
-    printf '该配置不能为空。\n' >&2
+    warn "value is required"
   done
 }
 
@@ -82,11 +91,11 @@ prompt_secret_required() {
       printf '%s' "${value}"
       return
     fi
-    printf '该配置不能为空。\n' >&2
+    warn "value is required"
   done
 }
 
-prompt_int() {
+prompt_positive_int() {
   local label="$1"
   local default_value="$2"
   local value
@@ -96,45 +105,126 @@ prompt_int() {
       printf '%s' "${value}"
       return
     fi
-    printf '请输入正整数。\n' >&2
+    warn "enter a positive integer"
   done
 }
 
-prepare_environment() {
-  require_command docker
-  docker compose version >/dev/null
+confirm() {
+  local question="$1"
+  local answer
+  printf '%s [y/N]: ' "${question}" >&2
+  read_line answer
+  case "${answer}" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+yaml_quote() {
+  local value="${1:-}"
+  [[ "${value}" != *$'\n'* ]] || fail "YAML scalar contains newline"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
+validate_node_type() {
+  case "$1" in
+    formal|temp) return 0 ;;
+    *) fail "unsupported node type: $1" ;;
+  esac
+}
+
+array_contains() {
+  local needle="$1"
+  local item
+  shift
+  for item in "$@"; do
+    [[ "${item}" == "${needle}" ]] && return 0
+  done
+  return 1
+}
+
+normalize_modes_csv() {
+  local raw="$1"
+  local part
+  local parts=()
+  local out=()
+  raw="${raw// /}"
+  [[ -n "${raw}" ]] || raw="default"
+  IFS=',' read -r -a parts <<< "${raw}"
+  for part in "${parts[@]}"; do
+    case "${part}" in
+      default|spj|interactive) ;;
+      "") continue ;;
+      *) fail "unsupported judge mode: ${part}" ;;
+    esac
+    if ! array_contains "${part}" "${out[@]}"; then
+      out+=("${part}")
+    fi
+  done
+  [[ "${#out[@]}" -gt 0 ]] || out=("default")
+  (IFS=','; printf '%s' "${out[*]}")
+}
+
+write_modes_yaml() {
+  local modes_csv="$1"
+  local mode
+  local modes=()
+  IFS=',' read -r -a modes <<< "${modes_csv}"
+  for mode in "${modes[@]}"; do
+    printf '    - %s\n' "${mode}"
+  done
+}
+
+prepare_dirs() {
   mkdir -p "${CONFIG_DIR}" "${SECURITY_DIR}" "${CACHE_DIR}"
-  chmod 700 "${CONFIG_DIR}" "${SECURITY_DIR}" || true
-  chmod 755 "${CACHE_DIR}" || true
+  chmod 700 "${CONFIG_DIR}" "${SECURITY_DIR}" 2>/dev/null || true
+  chmod 755 "${CACHE_DIR}" 2>/dev/null || true
 }
 
-build_image() {
-  log "构建镜像：${IMAGE}"
-  docker build -f "${SOURCE_DIR}/Dockerfile.hnieoj" -t "${IMAGE}" "${SOURCE_DIR}"
+check_source_tree() {
+  [[ -f "${SOURCE_DIR}/Dockerfile.hnieoj" ]] || fail "Dockerfile.hnieoj not found under ${SOURCE_DIR}"
 }
 
-write_common_config() {
+preflight() {
+  require_command docker
+  docker compose version >/dev/null 2>&1 || fail "docker compose plugin is not available"
+  check_source_tree
+  prepare_dirs
+}
+
+write_config_file() {
   local node_name="$1"
   local node_type="$2"
   local max_concurrency="$3"
-  local backend_url="$4"
-  local rabbit_host="$5"
-  local rabbit_port="$6"
-  local rabbit_username="$7"
-  local rabbit_password="$8"
-  local rabbit_vhost="$9"
-  local auth_code="${10}"
-  local nacos_server="${11}"
-  local nacos_namespace="${12}"
-  local remote_enabled="${13}"
-  local formal_token_group="${14}"
-  local formal_token_data_id="${15}"
+  local supported_modes="$4"
+  local backend_url="$5"
+  local rabbit_host="$6"
+  local rabbit_port="$7"
+  local rabbit_username="$8"
+  local rabbit_password="$9"
+  local rabbit_vhost="${10}"
+  local auth_code="${11}"
+  local nacos_server="${12}"
+  local nacos_namespace="${13}"
+  local remote_enabled="${14}"
+  local formal_token_group="${15}"
+  local formal_token_data_id="${16}"
 
-  cat > "${CONFIG_FILE}" <<EOF
+  local tmp_file
+  tmp_file="$(mktemp "${CONFIG_DIR}/config.yaml.tmp.XXXXXX")"
+
+  {
+    cat <<EOF
 node:
   name: $(yaml_quote "${node_name}")
   type: $(yaml_quote "${node_type}")
   maxConcurrency: ${max_concurrency}
+  supportedJudgeModes:
+EOF
+    write_modes_yaml "${supported_modes}"
+    cat <<EOF
 
 remoteConfig:
   enabled: ${remote_enabled}
@@ -195,13 +285,34 @@ heartbeat:
   endpoint: "/judge/nodes/heartbeat"
   interval: "30s"
 EOF
-  chmod 600 "${CONFIG_FILE}" || true
+  } > "${tmp_file}"
+
+  chmod 600 "${tmp_file}" 2>/dev/null || true
+  mv "${tmp_file}" "${CONFIG_FILE}"
+  log "wrote config: ${CONFIG_FILE}"
 }
 
-configure_interactive() {
+init_config() {
+  check_source_tree
+  prepare_dirs
+  if [[ -f "${CONFIG_FILE}" ]] && ! is_true "${FORCE:-false}"; then
+    confirm "Overwrite existing ${CONFIG_FILE}?" || fail "configuration was not changed"
+  fi
+
+  local node_type_choice
   local node_type
+  while true; do
+    node_type_choice="$(prompt "Node type: 1=formal, 2=temp" "1")"
+    case "${node_type_choice}" in
+      1|formal) node_type="formal"; break ;;
+      2|temp) node_type="temp"; break ;;
+      *) warn "enter 1, 2, formal, or temp" ;;
+    esac
+  done
+
   local node_name
   local max_concurrency
+  local supported_modes
   local backend_url
   local rabbit_host
   local rabbit_port
@@ -215,49 +326,52 @@ configure_interactive() {
   local formal_token_group=""
   local formal_token_data_id=""
 
-  printf '节点类型：1) 正式节点  2) 临时节点\n' >&2
-  while true; do
-    node_type="$(prompt "请选择节点类型" "1")"
-    case "${node_type}" in
-      1|formal) node_type="formal"; break ;;
-      2|temp) node_type="temp"; break ;;
-      *) printf '请输入 1 或 2。\n' >&2 ;;
-    esac
-  done
-
-  node_name="$(prompt "节点名称" "judge-node-01")"
-  max_concurrency="$(prompt_int "最大并发任务数" "2")"
-  backend_url="$(prompt "后端服务地址" "http://127.0.0.1:8800")"
-  rabbit_host="$(prompt "RabbitMQ 地址" "127.0.0.1")"
-  rabbit_port="$(prompt_int "RabbitMQ 端口" "5672")"
-  rabbit_username="$(prompt "RabbitMQ 用户名" "hnieoj_judge")"
-  rabbit_password="$(prompt_secret_required "RabbitMQ 密码")"
-  rabbit_vhost="$(prompt "RabbitMQ vhost" "hnieoj")"
+  node_name="$(prompt "Node name" "judge-node-01")"
+  max_concurrency="$(prompt_positive_int "Max concurrent tasks" "2")"
+  supported_modes="$(normalize_modes_csv "$(prompt "Supported judge modes" "default")")"
+  backend_url="$(prompt "HNieOJ backend base URL" "http://127.0.0.1:8800")"
+  rabbit_host="$(prompt "RabbitMQ host" "127.0.0.1")"
+  rabbit_port="$(prompt_positive_int "RabbitMQ port" "5672")"
+  rabbit_username="$(prompt "RabbitMQ username" "hnieoj_judge")"
+  rabbit_password="$(prompt_secret_required "RabbitMQ password")"
+  rabbit_vhost="$(prompt "RabbitMQ virtual host" "hnieoj")"
 
   if [[ "${node_type}" == "formal" ]]; then
-    mkdir -p "${SECURITY_DIR}"
-    if [[ ! -f "${PRIVATE_KEY_FILE}" ]]; then
-      fail "正式节点要求私钥文件存在：${PRIVATE_KEY_FILE}"
-    fi
-    chmod 600 "${PRIVATE_KEY_FILE}" || true
-    nacos_server="$(prompt "Nacos 地址" "http://127.0.0.1:8848")"
+    nacos_server="$(prompt "Nacos server URL" "http://127.0.0.1:8848")"
     nacos_namespace="$(prompt "Nacos namespace" "dev")"
-    remote_enabled="true"
-    formal_token_group="$(prompt "正式 Token Nacos Group" "HNIEOJ_SECRET_GROUP")"
-    formal_token_data_id="$(prompt "正式 Token Nacos Data ID" "hnieoj-judge-formal-token.yaml")"
+    remote_enabled="$(prompt "Enable remote runtime config from Nacos" "true")"
+    case "${remote_enabled}" in
+      true|false) ;;
+      *) fail "remote config must be true or false" ;;
+    esac
+    formal_token_group="$(prompt "Formal token Nacos group" "HNIEOJ_SECRET_GROUP")"
+    formal_token_data_id="$(prompt "Formal token Nacos dataId" "hnieoj-judge-formal-token.yaml")"
+    if [[ ! -f "${PRIVATE_KEY_FILE}" ]]; then
+      warn "formal private key is not present yet: ${PRIVATE_KEY_FILE}"
+      warn "copy it before starting the node"
+    else
+      chmod 600 "${PRIVATE_KEY_FILE}" 2>/dev/null || true
+    fi
   else
-    auth_code="$(prompt_required "临时节点授权码")"
+    auth_code="$(prompt_required "Temp node auth code")"
   fi
 
-  write_common_config "${node_name}" "${node_type}" "${max_concurrency}" "${backend_url}" \
+  write_config_file "${node_name}" "${node_type}" "${max_concurrency}" "${supported_modes}" "${backend_url}" \
     "${rabbit_host}" "${rabbit_port}" "${rabbit_username}" "${rabbit_password}" "${rabbit_vhost}" \
     "${auth_code}" "${nacos_server}" "${nacos_namespace}" "${remote_enabled}" \
     "${formal_token_group}" "${formal_token_data_id}"
-  log "配置已写入：${CONFIG_FILE}"
 }
 
-write_compose() {
-  cat > "${COMPOSE_FILE}" <<EOF
+render_compose() {
+  check_source_tree
+  prepare_dirs
+  [[ -f "${CONFIG_FILE}" ]] || fail "missing config file: ${CONFIG_FILE}; run '$0 init' first"
+
+  local tmp_file
+  tmp_file="$(mktemp "${CONFIG_DIR}/compose.yaml.tmp.XXXXXX")"
+
+  {
+    cat <<EOF
 services:
   go-judge-sandbox:
     image: ${IMAGE}
@@ -268,94 +382,146 @@ services:
       - /usr/local/bin/go-judge
       - -http-addr=:5050
       - -mount-conf=/opt/go-judge/mount.yaml
+      - -file-timeout=${GOJUDGE_FILE_TIMEOUT}
+EOF
+    if is_true "${PUBLISH_GOJUDGE}"; then
+      cat <<EOF
     ports:
-      - "${GOJUDGE_PUBLIC_PORT}:5050"
+      - "${GOJUDGE_BIND_ADDR}:${GOJUDGE_PUBLIC_PORT}:5050"
+EOF
+    fi
+    cat <<EOF
     networks:
       - hnieoj-judge
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   hnieoj-judge-node:
     image: ${IMAGE}
     restart: unless-stopped
+    depends_on:
+      - go-judge-sandbox
     command:
       - /usr/local/bin/hnieoj-judge-node
       - -config
       - /etc/hnieoj/go-judge/config.yaml
     volumes:
-      - ${CONFIG_FILE}:/etc/hnieoj/go-judge/config.yaml:ro
-      - ${SECURITY_DIR}:/etc/hnieoj/judge-security:ro
-      - ${CACHE_DIR}:/data/oj/judge-cache
+      - "${CONFIG_FILE}:/etc/hnieoj/go-judge/config.yaml:ro"
+      - "${SECURITY_DIR}:/etc/hnieoj/judge-security:ro"
+      - "${CACHE_DIR}:/data/oj/judge-cache"
     networks:
       - hnieoj-judge
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
 networks:
   hnieoj-judge:
     driver: bridge
 EOF
-  chmod 600 "${COMPOSE_FILE}" || true
-  log "Compose 已写入：${COMPOSE_FILE}"
+  } > "${tmp_file}"
+
+  chmod 600 "${tmp_file}" 2>/dev/null || true
+  mv "${tmp_file}" "${COMPOSE_FILE}"
+  log "wrote compose file: ${COMPOSE_FILE}"
 }
 
-configure() {
-  prepare_environment
-  configure_interactive
-  write_compose
+doctor() {
+  preflight
+  [[ -f "${CONFIG_FILE}" ]] || fail "missing config file: ${CONFIG_FILE}"
+  [[ -f "${COMPOSE_FILE}" ]] || fail "compose file is missing: ${COMPOSE_FILE}; run '$0 render'"
+  if grep -Eq 'type:[[:space:]]*"?formal"?' "${CONFIG_FILE}" && [[ ! -f "${PRIVATE_KEY_FILE}" ]]; then
+    fail "formal node private key is missing: ${PRIVATE_KEY_FILE}"
+  fi
+  docker_compose config >/dev/null
+  log "preflight checks passed"
+}
+
+build_image() {
+  preflight
+  log "building image: ${IMAGE}"
+  docker build -f "${SOURCE_DIR}/Dockerfile.hnieoj" -t "${IMAGE}" "${SOURCE_DIR}"
+}
+
+up() {
+  render_compose
+  doctor
+  docker_compose up -d
+  docker_compose ps
 }
 
 deploy() {
-  prepare_environment
+  preflight
   if [[ ! -f "${CONFIG_FILE}" ]]; then
-    configure_interactive
-  else
-    local answer
-    printf '发现已有配置 %s，是否重新交互生成？[y/N]: ' "${CONFIG_FILE}"
-    read_line answer
-    case "${answer}" in
-      y|Y|yes|YES) configure_interactive ;;
-      *) log "使用已有配置：${CONFIG_FILE}" ;;
-    esac
+    log "config file not found; starting interactive initialization"
+    init_config
   fi
-  write_compose
+  render_compose
   build_image
-  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" up -d
-  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" ps
-  log "查看日志：bash deploy/deploy-judge-node.sh logs"
+  doctor
+  docker_compose up -d
+  docker_compose ps
+  log "deployment completed"
 }
 
 usage() {
   cat <<EOF
-用法：
-  bash deploy/deploy-judge-node.sh [命令]
+Usage:
+  bash deploy/deploy-judge-node.sh <command>
 
-命令：
-  deploy      交互生成配置、构建镜像并启动，默认命令
-  configure   只交互生成 ${CONFIG_FILE}
-  build       只构建镜像
-  up          启动容器
-  ps          查看容器状态
-  logs        查看容器日志
-  down        停止并移除容器
-  help        显示帮助
+Commands:
+  deploy        Initialize config when missing, render compose, build image, and start services.
+  init          Interactively write ${CONFIG_FILE}.
+  render        Render ${COMPOSE_FILE} from current environment and config path.
+  doctor        Validate Docker, config, compose, and formal-node key requirements.
+  build         Build ${IMAGE} from Dockerfile.hnieoj.
+  up            Render compose and start services.
+  restart       Restart services.
+  ps            Show service status.
+  logs          Follow logs. Pass service names after the command if needed.
+  down          Stop and remove services.
+  help          Show this help.
 
-也可以手动复制模板：
-  cp deploy/config.formal.example.yaml ${CONFIG_FILE}
-  cp deploy/config.temp.example.yaml ${CONFIG_FILE}
-  vi ${CONFIG_FILE}
-  bash deploy/deploy-judge-node.sh up
+Useful environment variables:
+  IMAGE=${IMAGE}
+  PROJECT_NAME=${PROJECT_NAME}
+  CONFIG_DIR=${CONFIG_DIR}
+  SECURITY_DIR=${SECURITY_DIR}
+  CACHE_DIR=${CACHE_DIR}
+  GOJUDGE_FILE_TIMEOUT=${GOJUDGE_FILE_TIMEOUT}
+  PUBLISH_GOJUDGE=${PUBLISH_GOJUDGE}
+  GOJUDGE_BIND_ADDR=${GOJUDGE_BIND_ADDR}
+  GOJUDGE_PUBLIC_PORT=${GOJUDGE_PUBLIC_PORT}
+
+Examples:
+  bash deploy/deploy-judge-node.sh init
+  bash deploy/deploy-judge-node.sh deploy
+  PUBLISH_GOJUDGE=true bash deploy/deploy-judge-node.sh up
+  bash deploy/deploy-judge-node.sh logs hnieoj-judge-node
 EOF
 }
 
 main() {
   local command="${1:-deploy}"
+  shift || true
   case "${command}" in
     deploy) deploy ;;
-    configure) configure ;;
-    build) prepare_environment; build_image ;;
-    up) prepare_environment; write_compose; docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" up -d ;;
-    ps) docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" ps ;;
-    logs) docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" logs -f --tail=200 ;;
-    down) docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" down ;;
+    init|configure) init_config ;;
+    render) render_compose ;;
+    doctor|check) doctor ;;
+    build) build_image ;;
+    up) up ;;
+    restart) render_compose; doctor; docker_compose restart "$@" ;;
+    ps) docker_compose ps "$@" ;;
+    logs) docker_compose logs -f --tail="${TAIL:-200}" "$@" ;;
+    down) docker_compose down "$@" ;;
     help|-h|--help) usage ;;
-    *) usage; fail "未知命令：${command}" ;;
+    *) usage; fail "unknown command: ${command}" ;;
   esac
 }
 

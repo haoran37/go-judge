@@ -2,6 +2,8 @@ node:
   name: judge-node-temp-01
   type: temp
   maxConcurrency: 2
+  supportedJudgeModes:
+    - default
 
 remoteConfig:
   enabled: false
