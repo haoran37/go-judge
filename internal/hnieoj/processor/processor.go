@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -55,6 +56,11 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 
 	cases, _, err := p.testdataClient.Ensure(ctx, task.ProblemID, task.DataVersion)
 	if err != nil {
+		var permanent testdata.ErrPermanent
+		if errors.As(err, &permanent) {
+			_ = p.reportFailed(ctx, task, 0, permanent.Error())
+			return ErrNonRetryable{Err: permanent}
+		}
 		return ErrRetryable{Err: err}
 	}
 	total := len(cases)

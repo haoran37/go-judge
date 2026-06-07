@@ -16,6 +16,18 @@ import (
 	"github.com/criyle/go-judge/internal/hnieoj/model"
 )
 
+type ErrPermanent struct {
+	Err error
+}
+
+func (e ErrPermanent) Error() string {
+	return e.Err.Error()
+}
+
+func (e ErrPermanent) Unwrap() error {
+	return e.Err
+}
+
 type Credential interface {
 	Apply(req *http.Request)
 }
@@ -64,20 +76,30 @@ func (c *Client) Ensure(ctx context.Context, problemID, expectedVersion int64) (
 	case http.StatusNotModified:
 		c.logger.Info("testdata cache hit", logging.Int64("problemId", problemID), logging.Int64("version", remoteVersion))
 	case http.StatusOK:
+		if !isZipResponse(resp.Header.Get("Content-Type")) {
+			return nil, 0, ErrPermanent{Err: fmt.Errorf("testdata response is not zip, contentType: %s", resp.Header.Get("Content-Type"))}
+		}
 		c.logger.Info("testdata cache miss", logging.Int64("problemId", problemID), logging.Int64("version", remoteVersion))
 		if err := c.replaceFromZip(resp.Body, problemRoot, testdataDir, versionFile, remoteVersion); err != nil {
-			return nil, 0, err
+			return nil, 0, ErrPermanent{Err: err}
 		}
 		c.logger.Info("testdata downloaded", logging.Int64("problemId", problemID), logging.Int64("version", remoteVersion))
 	default:
+		if resp.StatusCode >= http.StatusBadRequest && resp.StatusCode < http.StatusInternalServerError {
+			return nil, 0, ErrPermanent{Err: fmt.Errorf("testdata download failed with status %d", resp.StatusCode)}
+		}
 		return nil, 0, fmt.Errorf("testdata download failed with status %d", resp.StatusCode)
 	}
 
 	cases, err := LoadCases(testdataDir)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, ErrPermanent{Err: err}
 	}
 	return cases, remoteVersion, nil
+}
+
+func isZipResponse(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "application/zip")
 }
 
 func (c *Client) replaceFromZip(r io.Reader, problemRoot, testdataDir, versionFile string, version int64) error {
