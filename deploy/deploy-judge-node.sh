@@ -39,7 +39,7 @@ prompt() {
   local label="$1"
   local default_value="$2"
   local value
-  printf '%s [%s]: ' "${label}" "${default_value}"
+  printf '%s [%s]: ' "${label}" "${default_value}" >&2
   read -r value
   if [[ -z "${value}" ]]; then
     printf '%s' "${default_value}"
@@ -52,13 +52,13 @@ prompt_required() {
   local label="$1"
   local value
   while true; do
-    printf '%s: ' "${label}"
+    printf '%s: ' "${label}" >&2
     read -r value
     if [[ -n "${value}" ]]; then
       printf '%s' "${value}"
       return
     fi
-    printf '该配置不能为空。\n'
+    printf '该配置不能为空。\n' >&2
   done
 }
 
@@ -66,14 +66,14 @@ prompt_secret_required() {
   local label="$1"
   local value
   while true; do
-    printf '%s: ' "${label}"
+    printf '%s: ' "${label}" >&2
     read -r -s value
-    printf '\n'
+    printf '\n' >&2
     if [[ -n "${value}" ]]; then
       printf '%s' "${value}"
       return
     fi
-    printf '该配置不能为空。\n'
+    printf '该配置不能为空。\n' >&2
   done
 }
 
@@ -87,7 +87,7 @@ prompt_int() {
       printf '%s' "${value}"
       return
     fi
-    printf '请输入正整数。\n'
+    printf '请输入正整数。\n' >&2
   done
 }
 
@@ -206,13 +206,13 @@ configure_interactive() {
   local formal_token_group=""
   local formal_token_data_id=""
 
-  printf '节点类型：1) 正式节点  2) 临时节点\n'
+  printf '节点类型：1) 正式节点  2) 临时节点\n' >&2
   while true; do
     node_type="$(prompt "请选择节点类型" "1")"
     case "${node_type}" in
       1|formal) node_type="formal"; break ;;
       2|temp) node_type="temp"; break ;;
-      *) printf '请输入 1 或 2。\n' ;;
+      *) printf '请输入 1 或 2。\n' >&2 ;;
     esac
   done
 
