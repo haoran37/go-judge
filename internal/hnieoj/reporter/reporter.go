@@ -104,7 +104,7 @@ func (r *HTTPReporter) report(ctx context.Context, e model.Event) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", fmt.Sprintf("%s:%s:%d:%d", e.SubmissionID, e.EventType, e.JudgedCase, e.CurrentCase))
+	req.Header.Set("Idempotency-Key", fmt.Sprintf("%s:%s:%s:%d:%d", e.SubmissionID, e.JudgeTaskID, e.EventType, e.JudgedCase, e.CurrentCase))
 	r.cred.Apply(req)
 
 	resp, err := r.httpClient.Do(req)

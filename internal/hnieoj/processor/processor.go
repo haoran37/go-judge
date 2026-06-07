@@ -38,16 +38,20 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 	if task.SubmissionID == "" {
 		return ErrNonRetryable{Err: fmt.Errorf("submissionId is required")}
 	}
+	if task.JudgeTaskID == "" {
+		return ErrNonRetryable{Err: fmt.Errorf("judgeTaskId is required")}
+	}
 	if p.cred.Expired(time.Now()) {
 		return ErrRetryable{Err: fmt.Errorf("temporary credential expired")}
 	}
-	if _, loaded := p.inFlight.LoadOrStore(task.SubmissionID, struct{}{}); loaded {
-		p.logger.Warn("duplicate task ignored", logging.String("submissionId", task.SubmissionID))
+	key := taskKey(task)
+	if _, loaded := p.inFlight.LoadOrStore(key, struct{}{}); loaded {
+		p.logger.Warn("duplicate task ignored", logging.String("submissionId", task.SubmissionID), logging.String("judgeTaskId", task.JudgeTaskID))
 		return nil
 	}
-	defer p.inFlight.Delete(task.SubmissionID)
+	defer p.inFlight.Delete(key)
 
-	p.logger.Info("task received", logging.String("submissionId", task.SubmissionID), logging.Int64("problemId", task.ProblemID), logging.String("language", task.Language))
+	p.logger.Info("task received", logging.String("submissionId", task.SubmissionID), logging.String("judgeTaskId", task.JudgeTaskID), logging.Int64("problemId", task.ProblemID), logging.String("language", task.Language))
 	if task.JudgeMode != "" && task.JudgeMode != "default" {
 		err := ErrNonRetryable{Err: fmt.Errorf("unsupported judge mode %q", task.JudgeMode)}
 		_ = p.reportFailed(ctx, task, 0, err.Error())
@@ -133,6 +137,10 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 	p.logger.Info("judge finished", logging.String("submissionId", task.SubmissionID), logging.Int("status", finalStatus), logging.Int("score", totalScore))
 	_ = results
 	return nil
+}
+
+func taskKey(task model.Task) string {
+	return task.SubmissionID + ":" + task.JudgeTaskID
 }
 
 func (p *Processor) reportFailed(ctx context.Context, task model.Task, total int, message string) error {

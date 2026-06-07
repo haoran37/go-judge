@@ -30,6 +30,7 @@ const (
 
 type Task struct {
 	SubmissionID     string    `json:"submissionId"`
+	JudgeTaskID      string    `json:"judgeTaskId"`
 	JudgeID          int64     `json:"judgeId"`
 	ProblemID        int64     `json:"problemId"`
 	ProblemCode      string    `json:"problemCode"`
@@ -66,6 +67,7 @@ type CaseResult struct {
 type Event struct {
 	EventType    string      `json:"eventType"`
 	SubmissionID string      `json:"submissionId"`
+	JudgeTaskID  string      `json:"judgeTaskId"`
 	Status       int         `json:"status"`
 	StatusText   string      `json:"statusText"`
 	TotalCase    int         `json:"totalCase"`
@@ -108,6 +110,7 @@ func NewEvent(eventType string, task Task, status, totalCase, judgedCase, curren
 	return Event{
 		EventType:    eventType,
 		SubmissionID: task.SubmissionID,
+		JudgeTaskID:  task.JudgeTaskID,
 		Status:       status,
 		StatusText:   StatusText(status),
 		TotalCase:    totalCase,
