@@ -69,15 +69,26 @@ func Authenticate(ctx context.Context, cfg config.Config, client *http.Client) (
 }
 
 func resolveFormalToken(ctx context.Context, cfg config.FormalToken, client *http.Client) (string, error) {
-	encryptedToken := strings.TrimSpace(cfg.EncryptedToken)
-	if encryptedToken == "" {
-		var err error
-		encryptedToken, err = fetchEncryptedTokenFromNacos(ctx, cfg, client)
-		if err != nil {
+	if cfg.Nacos.ServerAddr != "" && cfg.Nacos.DataID != "" && cfg.Nacos.Group != "" {
+		encryptedToken, err := fetchEncryptedTokenFromNacos(ctx, cfg, client)
+		if err == nil {
+			return decryptFormalToken(cfg, encryptedToken)
+		}
+		if isPlaceholderToken(cfg.EncryptedToken) {
 			return "", err
 		}
 	}
+
+	encryptedToken := strings.TrimSpace(cfg.EncryptedToken)
+	if isPlaceholderToken(encryptedToken) {
+		return "", errors.New("formal encrypted token is required")
+	}
 	return decryptFormalToken(cfg, encryptedToken)
+}
+
+func isPlaceholderToken(value string) bool {
+	normalized := strings.TrimSpace(value)
+	return normalized == "" || normalized == "replace_me" || normalized == "{rsa}Base64CipherText"
 }
 
 func startFormalTokenRefresher(ctx context.Context, cfg config.FormalToken, client *http.Client, cred *Credential) {
