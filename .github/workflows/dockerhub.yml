@@ -56,4 +56,4 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: haoran37/hnieoj-go-judge
           readme-filepath: ./DOCKERHUB_README.md
-          short-description: HNieOJ go-judge sandbox and judge-node image
+          short-description: HnieOJ go-judge sandbox and judge-node image
