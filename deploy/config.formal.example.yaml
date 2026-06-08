@@ -2,7 +2,7 @@
 # formal 节点用于长期在线生产判题，依赖本地私钥和 Nacos 中的 formal token 密文。
 
 node:
-  # 节点名称。建议在 HNieOJ 集群内唯一，便于心跳、日志和故障定位。
+  # 节点名称。建议在 HnieOJ 集群内唯一，便于心跳、日志和故障定位。
   name: judge-node-01
   # formal 表示正式长期节点；不要把临时节点授权码填到 formal 节点配置中。
   type: formal
@@ -23,7 +23,7 @@ remoteConfig:
     dataId: "hnieoj-judge-node.yaml"
 
 hnieoj:
-  # HNieOJ 后端网关地址。容器网络部署时通常填写后端服务名或网关服务名。
+  # HnieOJ 后端网关地址。容器网络部署时通常填写后端服务名或网关服务名。
   baseUrl: "http://gateway:8800"
   # 节点访问后端认证、测试数据、事件上报、心跳接口的 HTTP 超时。
   requestTimeout: "30s"

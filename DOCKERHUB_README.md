@@ -1,6 +1,6 @@
-# HNieOJ go-judge 判题机镜像
+# HnieOJ go-judge 判题机镜像
 
-这是 HNieOJ 判题节点镜像，基于 [criyle/go-judge](https://github.com/criyle/go-judge) 二次开发，包含：
+这是 HnieOJ 判题节点镜像，基于 [criyle/go-judge](https://github.com/criyle/go-judge) 二次开发，包含：
 
 - `go-judge` 沙箱服务；
 - `hnieoj-judge-node` 判题节点适配层；
@@ -8,8 +8,8 @@
 
 相关项目：
 
-- HNieOJ 后端：[https://github.com/haoran37/HNieOJ-backend](https://github.com/haoran37/HNieOJ-backend)
-- HNieOJ 前端：[https://github.com/haoran37/HNieOJ](https://github.com/haoran37/HNieOJ)
+- HnieOJ 后端：[https://github.com/haoran37/HNieOJ-backend](https://github.com/haoran37/HNieOJ-backend)
+- HnieOJ 前端：[https://github.com/haoran37/HNieOJ](https://github.com/haoran37/HNieOJ)
 - API 文档：[https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8](https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8)
 
 ## 镜像标签

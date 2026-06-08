@@ -1,4 +1,4 @@
-# HNieOJ 判题节点示例配置。
+# HnieOJ 判题节点示例配置。
 # 部署时建议复制为实际运行配置后再修改，不要直接提交真实密码、授权码或私钥。
 
 node:
@@ -22,7 +22,7 @@ remoteConfig:
     dataId: "hnieoj-judge-node.yaml"
 
 hnieoj:
-  # HNieOJ 后端服务地址，节点会访问认证、测试数据、事件上报和心跳接口。
+  # HnieOJ 后端服务地址，节点会访问认证、测试数据、事件上报和心跳接口。
   baseUrl: "https://oj.example.com"
   # 节点访问后端接口的 HTTP 超时时间。
   requestTimeout: "30s"

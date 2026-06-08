@@ -1,18 +1,18 @@
-# HNieOJ go-judge 判题机
+# HnieOJ go-judge 判题机
 
-本仓库是在 [criyle/go-judge](https://github.com/criyle/go-judge) 基础上的 HNieOJ 二次开发版本，保留 go-judge 沙箱能力，并增加 HNieOJ 判题节点适配层，用于接入后端任务队列、测试数据缓存、节点认证、心跳和判题事件上报。
+本仓库是在 [criyle/go-judge](https://github.com/criyle/go-judge) 基础上的 HnieOJ 二次开发版本，保留 go-judge 沙箱能力，并增加 HnieOJ 判题节点适配层，用于接入后端任务队列、测试数据缓存、节点认证、心跳和判题事件上报。
 
 相关项目：
 
 - 源仓库：[https://github.com/criyle/go-judge](https://github.com/criyle/go-judge)
-- HNieOJ 后端：[https://github.com/haoran37/HNieOJ-backend](https://github.com/haoran37/HNieOJ-backend)
-- HNieOJ 前端：[https://github.com/haoran37/HNieOJ](https://github.com/haoran37/HNieOJ)
+- HnieOJ 后端：[https://github.com/haoran37/HNieOJ-backend](https://github.com/haoran37/HNieOJ-backend)
+- HnieOJ 前端：[https://github.com/haoran37/HNieOJ](https://github.com/haoran37/HNieOJ)
 - API 文档：[https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8](https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8)
 
 ## 功能
 
 - go-judge 沙箱服务：提供受限程序执行环境。
-- HNieOJ 判题节点：消费 RabbitMQ 判题任务，调用沙箱执行，向后端上报判题事件。
+- HnieOJ 判题节点：消费 RabbitMQ 判题任务，调用沙箱执行，向后端上报判题事件。
 - 节点认证：支持 formal 长期节点和 temp 临时节点。
 - 临时节点预认证：部署脚本会先用临时授权码兑换 JWT，成功后再启动容器。
 - 测试数据缓存：支持容量、未使用时间和定时清理。

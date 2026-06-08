@@ -357,7 +357,7 @@ write_config_file() {
 
   {
     cat <<EOF
-# HNieOJ 判题节点运行配置。
+# HnieOJ 判题节点运行配置。
 # 由 deploy/deploy-judge-node.sh 生成。真实密码、授权码和私钥不要提交到仓库。
 
 node:
@@ -383,7 +383,7 @@ remoteConfig:
     dataId: "hnieoj-judge-node.yaml"
 
 hnieoj:
-  # HNieOJ 后端服务地址。
+  # HnieOJ 后端服务地址。
   baseUrl: $(yaml_quote "${backend_url}")
   # 节点访问后端接口的超时时间。
   requestTimeout: "30s"
@@ -510,7 +510,7 @@ init_config() {
   node_name="$(prompt "节点名称" "judge-node-01")"
   max_concurrency="$(prompt_positive_int "最大并发判题任务数" "2")"
   supported_modes="$(normalize_modes_csv "$(prompt "支持的判题模式" "default")")"
-  backend_url="$(prompt "HNieOJ 后端基础地址" "http://127.0.0.1:8800")"
+  backend_url="$(prompt "HnieOJ 后端基础地址" "http://127.0.0.1:8800")"
   rabbit_host="$(prompt "RabbitMQ 主机" "127.0.0.1")"
   rabbit_port="$(prompt_positive_int "RabbitMQ 端口" "5672")"
   rabbit_username="$(prompt "RabbitMQ 用户名" "hnieoj_judge")"

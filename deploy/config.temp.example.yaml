@@ -17,7 +17,7 @@ remoteConfig:
   enabled: false
 
 hnieoj:
-  # HNieOJ 后端地址。部署脚本会用该地址在容器启动前兑换 JWT。
+  # HnieOJ 后端地址。部署脚本会用该地址在容器启动前兑换 JWT。
   baseUrl: "http://127.0.0.1:8800"
   # 节点访问后端接口的 HTTP 超时时间。
   requestTimeout: "30s"
