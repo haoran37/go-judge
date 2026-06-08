@@ -21,7 +21,7 @@ haoran37/hnieoj-go-judge:sha-<commit>
 
 `latest` 来自 `master` 分支最新构建；生产环境建议使用 `sha-<commit>` 固定标签。
 
-## Ubuntu 一句话部署
+## Ubuntu 一键部署
 
 当前部署脚本只适配 Ubuntu，会检查 Docker、Docker Compose v2 插件和 Docker daemon 状态。
 
