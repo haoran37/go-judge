@@ -1,3 +1,6 @@
+# formal 判题节点示例配置。
+# formal 节点用于长期在线生产判题，依赖本地私钥和 Nacos 中的 formal token 密文。
+
 node:
   name: judge-node-01
   type: formal
@@ -6,6 +9,7 @@ node:
     - default
 
 remoteConfig:
+  # formal 节点通常开启远程运行配置，用于统一调整心跳、缓存、MQ 重试等非敏感参数。
   enabled: true
   nacos:
     serverAddr: "http://127.0.0.1:8848"
@@ -17,6 +21,7 @@ hnieoj:
   baseUrl: "http://gateway:8800"
   requestTimeout: "30s"
   formalToken:
+    # 容器内私钥路径，由部署脚本从宿主机 /etc/hnieoj/judge-security 挂载。
     privateKeyPath: "/etc/hnieoj/judge-security/judge_formal_private.pem"
     cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
     refreshInterval: "30s"

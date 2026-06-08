@@ -1,3 +1,6 @@
+# temp 判题节点示例配置。
+# temp 节点适合临时扩容或短期比赛。部署脚本会先用 authCode 兑换 JWT，成功后再启动容器。
+
 node:
   name: judge-node-temp-01
   type: temp
@@ -21,7 +24,9 @@ hnieoj:
       group: ""
       dataId: ""
   tempToken:
+    # 临时授权码。真实值不要提交到仓库。
     authCode: "replace_me"
+    # 以下字段由部署脚本兑换成功后写入；手工部署时需要自行预兑换或保留容器内兑换兜底。
     jwt: ""
     tokenType: "Bearer"
     nodeId: ""

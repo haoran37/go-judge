@@ -2,7 +2,9 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-IMAGE="${IMAGE:-hnieoj/go-judge:dev}"
+IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-haoran37/hnieoj-go-judge}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE="${IMAGE:-${IMAGE_REPOSITORY}:${IMAGE_TAG}}"
 PROJECT_NAME="${PROJECT_NAME:-hnieoj-judge-node}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/hnieoj/go-judge}"
 SECURITY_DIR="${SECURITY_DIR:-/etc/hnieoj/judge-security}"
@@ -323,16 +325,24 @@ write_config_file() {
 
   {
     cat <<EOF
+# HNieOJ 判题节点运行配置。
+# 由 deploy/deploy-judge-node.sh 生成。真实密码、授权码和私钥不要提交到仓库。
+
 node:
+  # 节点名称，建议全局唯一。
   name: $(yaml_quote "${node_name}")
+  # 节点类型：formal 为正式长期节点，temp 为临时节点。
   type: $(yaml_quote "${node_type}")
+  # 最大并发判题任务数。
   maxConcurrency: ${max_concurrency}
+  # 本节点支持的判题模式。确认后端和题目协议闭环后再开启 spj/interactive。
   supportedJudgeModes:
 EOF
     write_modes_yaml "${supported_modes}"
     cat <<EOF
 
 remoteConfig:
+  # 是否从 Nacos 加载非敏感运行参数。
   enabled: ${remote_enabled}
   nacos:
     serverAddr: $(yaml_quote "${nacos_server}")
@@ -341,11 +351,15 @@ remoteConfig:
     dataId: "hnieoj-judge-node.yaml"
 
 hnieoj:
+  # HNieOJ 后端服务地址。
   baseUrl: $(yaml_quote "${backend_url}")
+  # 节点访问后端接口的超时时间。
   requestTimeout: "30s"
   formalToken:
+    # formal 节点私钥路径。容器内路径由部署脚本挂载。
     privateKeyPath: $(yaml_quote "${PRIVATE_KEY_FILE}")
     cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
+    # formal token 密文刷新间隔。
     refreshInterval: "30s"
     nacos:
       serverAddr: $(yaml_quote "${nacos_server}")
@@ -353,14 +367,21 @@ hnieoj:
       group: $(yaml_quote "${formal_token_group}")
       dataId: $(yaml_quote "${formal_token_data_id}")
   tempToken:
+    # temp 节点授权码。脚本会先用它兑换 JWT，成功后再启动容器。
     authCode: $(yaml_quote "${auth_code}")
+    # 预兑换得到的 JWT。容器启动时优先使用该值作为首次凭证。
     jwt: $(yaml_quote "${temp_jwt}")
+    # JWT 类型，通常为 Bearer。
     tokenType: $(yaml_quote "${temp_token_type}")
+    # 后端返回的临时节点 ID。
     nodeId: $(yaml_quote "${temp_node_id}")
+    # 后端返回的临时 token ID。
     tokenId: $(yaml_quote "${temp_token_id}")
+    # JWT 过期时间。节点会在过期前使用 authCode 刷新。
     expireTime: $(yaml_quote "${temp_expire_time}")
 
 rabbitmq:
+  # RabbitMQ 连接和判题任务队列配置。
   host: $(yaml_quote "${rabbit_host}")
   port: ${rabbit_port}
   username: $(yaml_quote "${rabbit_username}")
@@ -372,26 +393,37 @@ rabbitmq:
   deadLetterExchange: "hnieoj.judge.dlx"
   deadLetterQueue: "hnieoj.judge.task.dlq"
   deadLetterRoutingKey: "judge.submission.created.dlq"
+  # 预取数量通常与 maxConcurrency 保持一致。
   prefetch: ${max_concurrency}
+  # 可重试错误的最大重试次数和退避间隔。
   maxRetries: 3
   retryBackoff: "10s"
 
 testdata:
+  # 测试数据缓存目录。
   cacheRoot: "/data/oj/judge-cache"
+  # 缓存最大字节数。0 表示不按容量清理。
   maxCacheBytes: 21474836480
+  # 多久未使用后可清理。0 表示不按时间清理。
   maxUnusedDuration: "72h"
+  # 缓存清理任务执行间隔。
   cleanupInterval: "1h"
+  # 心跳缓存/磁盘统计采样间隔。
   statsInterval: "5m"
 
 gojudge:
+  # go-judge sandbox 服务地址。
   endpoint: "http://go-judge-sandbox:5050"
+  # 如果 sandbox 开启 -auth-token，则填写对应 token。
   authToken: ""
 
 reporter:
+  # http 表示上报后端；log/mock 适合本地调试。
   mode: "http"
   endpoint: "/judge/submissions/{submissionId}/events"
 
 heartbeat:
+  # 生产环境建议开启心跳，间隔不要设置为 1 秒级别。
   enabled: true
   endpoint: "/judge/nodes/heartbeat"
   interval: "30s"
@@ -576,6 +608,12 @@ build_image() {
   docker build -f "${SOURCE_DIR}/Dockerfile.hnieoj" -t "${IMAGE}" "${SOURCE_DIR}"
 }
 
+pull_image() {
+  preflight
+  log "pulling image: ${IMAGE}"
+  docker pull "${IMAGE}"
+}
+
 up() {
   render_compose
   doctor
@@ -590,9 +628,9 @@ deploy() {
     init_config
   fi
   render_compose
-  build_image
+  pull_image
   doctor
-  docker_compose up -d
+  docker_compose up -d --force-recreate --remove-orphans
   docker_compose ps
   log "deployment completed"
 }
@@ -603,11 +641,12 @@ Usage:
   bash deploy/deploy-judge-node.sh <command>
 
 Commands:
-  deploy        Initialize config when missing, render compose, build image, and start services.
+  deploy        Initialize config when missing, render compose, pull image, and recreate services.
   init          Interactively write ${CONFIG_FILE}.
   render        Render ${COMPOSE_FILE} from current environment and config path.
   doctor        Validate Docker, config, compose, and formal-node key requirements.
-  build         Build ${IMAGE} from Dockerfile.hnieoj.
+  pull          Pull ${IMAGE} from Docker Hub.
+  build         Build ${IMAGE} locally from Dockerfile.hnieoj.
   up            Render compose and start services.
   restart       Restart services.
   ps            Show service status.
@@ -616,6 +655,8 @@ Commands:
   help          Show this help.
 
 Useful environment variables:
+  IMAGE_REPOSITORY=${IMAGE_REPOSITORY}
+  IMAGE_TAG=${IMAGE_TAG}
   IMAGE=${IMAGE}
   PROJECT_NAME=${PROJECT_NAME}
   CONFIG_DIR=${CONFIG_DIR}
@@ -629,6 +670,7 @@ Useful environment variables:
 Examples:
   bash deploy/deploy-judge-node.sh init
   bash deploy/deploy-judge-node.sh deploy
+  IMAGE_TAG=sha-abcdef0 bash deploy/deploy-judge-node.sh deploy
   PUBLISH_GOJUDGE=true bash deploy/deploy-judge-node.sh up
   bash deploy/deploy-judge-node.sh logs hnieoj-judge-node
 EOF
@@ -642,6 +684,7 @@ main() {
     init|configure) init_config ;;
     render) render_compose ;;
     doctor|check) doctor ;;
+    pull) pull_image ;;
     build) build_image ;;
     up) up ;;
     restart) render_compose; doctor; docker_compose restart "$@" ;;

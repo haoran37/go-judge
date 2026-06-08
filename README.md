@@ -18,6 +18,29 @@ Or, by docker
 docker run -it --rm --privileged --shm-size=256m -p 5050:5050 --name=go-judge criyle/go-judge
 ```
 
+### HNieOJ Docker Hub Image
+
+HNieOJ judge-node images are published from the `master` branch to Docker Hub:
+
+```text
+haoran37/hnieoj-go-judge:latest
+haoran37/hnieoj-go-judge:sha-<commit>
+```
+
+Recommended deployment uses the wrapper script:
+
+```bash
+IMAGE_TAG=latest bash deploy/deploy-judge-node.sh deploy
+```
+
+Use a fixed commit tag for production rollouts:
+
+```bash
+IMAGE_TAG=sha-xxxxxxx bash deploy/deploy-judge-node.sh deploy
+```
+
+Manual Docker or Compose deployment is possible, but temp judge nodes need a preflight `authCode` to JWT exchange before the container starts. The deployment script performs this check and writes `hnieoj.tempToken.jwt`; manual deployments must handle the same step or keep the container-side fallback behavior. Also keep go-judge `-file-timeout` enabled and do not expose the sandbox HTTP port publicly.
+
 ### REST API
 
 A REST service to run program in restricted environment (Listening on `localhost:5050` by default).
