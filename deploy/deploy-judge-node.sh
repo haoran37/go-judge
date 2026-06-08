@@ -39,16 +39,20 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "缺少命令：$1"
 }
 
-check_ubuntu() {
-  local os_id=""
+check_linux() {
+  local kernel_name=""
   local os_pretty=""
-  [[ -r /etc/os-release ]] || fail "当前只兼容 Ubuntu，未找到 /etc/os-release"
-  # 读取系统发行版标识，用于限制当前脚本只在 Ubuntu 上运行。
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  os_id="${ID:-}"
-  os_pretty="${PRETTY_NAME:-未知 Linux}"
-  [[ "${os_id}" == "ubuntu" ]] || fail "当前只兼容 Ubuntu，当前系统为：${os_pretty}"
+  kernel_name="$(uname -s 2>/dev/null || true)"
+  [[ "${kernel_name}" == "Linux" ]] || fail "当前脚本仅支持 Linux 系统，当前系统为：${kernel_name:-未知}"
+  if [[ -r /etc/os-release ]]; then
+    # 读取发行版名称用于错误提示；不按具体发行版做硬限制。
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    os_pretty="${PRETTY_NAME:-Linux}"
+  else
+    os_pretty="Linux"
+  fi
+  [[ -n "${os_pretty}" ]] || fail "无法识别 Linux 发行版"
 }
 
 check_default_path_permissions() {
@@ -230,7 +234,7 @@ check_source_tree() {
 }
 
 preflight() {
-  check_ubuntu
+  check_linux
   check_default_path_permissions
   check_docker
   prepare_dirs
@@ -468,7 +472,7 @@ EOF
 }
 
 init_config() {
-  check_ubuntu
+  check_linux
   check_default_path_permissions
   prepare_dirs
   if [[ -f "${CONFIG_FILE}" ]] && ! is_true "${FORCE:-false}"; then
@@ -556,7 +560,7 @@ init_config() {
 }
 
 render_compose() {
-  check_ubuntu
+  check_linux
   check_default_path_permissions
   prepare_dirs
   [[ -f "${CONFIG_FILE}" ]] || fail "缺少配置文件：${CONFIG_FILE}；请先执行 '$0 init'"

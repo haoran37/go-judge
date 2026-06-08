@@ -39,9 +39,9 @@ haoran37/hnieoj-go-judge:sha-<commit>
 
 项目采用简单 Git Flow：日常开发进入 `develop`，合并到 `master` 后才触发 GitHub Actions 构建并发布 Docker Hub 镜像。生产部署建议使用 `sha-<commit>` 固定标签，避免 `latest` 漂移。
 
-## Ubuntu 部署
+## Linux 部署
 
-当前部署脚本只适配 Ubuntu，并会检查 Docker、Docker Compose v2 插件和 Docker daemon 状态。默认部署目录如下：
+部署脚本面向主流 Linux 发行版，已在 Ubuntu 系列环境验证；其他发行版只要求具备 Bash、Docker Engine、Docker Compose v2 插件，并能访问 Docker daemon。默认部署目录如下：
 
 ```text
 /etc/hnieoj/go-judge

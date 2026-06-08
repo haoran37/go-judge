@@ -21,9 +21,9 @@ haoran37/hnieoj-go-judge:sha-<commit>
 
 `latest` 来自 `master` 分支最新构建；生产环境建议使用 `sha-<commit>` 固定标签。
 
-## Ubuntu 一键部署
+## Linux 一键部署
 
-当前部署脚本只适配 Ubuntu，会检查 Docker、Docker Compose v2 插件和 Docker daemon 状态。
+部署脚本面向主流 Linux 发行版，已在 Ubuntu 系列环境验证；其他发行版只要求具备 Bash、Docker Engine、Docker Compose v2 插件，并能访问 Docker daemon。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/master/deploy/deploy-judge-node.sh -o /tmp/hnieoj-judge-node.sh && sudo IMAGE_TAG=latest bash /tmp/hnieoj-judge-node.sh deploy
