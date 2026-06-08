@@ -8,8 +8,8 @@
 
 相关项目：
 
-- HnieOJ 后端：[https://github.com/haoran37/HNieOJ-backend](https://github.com/haoran37/HNieOJ-backend)
-- HnieOJ 前端：[https://github.com/haoran37/HNieOJ](https://github.com/haoran37/HNieOJ)
+- HnieOJ 后端：[HnieOJ 后端仓库](https://github.com/haoran37/HNieOJ-backend)
+- HnieOJ 前端：[HnieOJ 前端仓库](https://github.com/haoran37/HNieOJ)
 - API 文档：[https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8](https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8)
 
 ## 镜像标签
