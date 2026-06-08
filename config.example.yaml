@@ -30,6 +30,11 @@ hnieoj:
       dataId: "hnieoj-judge-formal-token.yaml"
   tempToken:
     authCode: ""
+    jwt: ""
+    tokenType: ""
+    nodeId: ""
+    tokenId: ""
+    expireTime: ""
 
 rabbitmq:
   host: "127.0.0.1"

@@ -68,6 +68,22 @@ func TestCredentialReplace(t *testing.T) {
 	}
 }
 
+func TestCredentialFromTempTokenConfig(t *testing.T) {
+	cred, err := credentialFromTempTokenConfig(config.TempToken{
+		JWT:        "jwt-value",
+		TokenType:  "Bearer",
+		NodeID:     "node-id",
+		TokenID:    "token-id",
+		ExpireTime: "2026-05-12T14:00:00",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.HeaderName != "Authorization" || cred.HeaderValue != "Bearer jwt-value" || cred.NodeID != "node-id" || cred.TokenID != "token-id" || cred.ExpireTime.IsZero() {
+		t.Fatalf("unexpected credential: %+v", cred)
+	}
+}
+
 func TestTempRefreshDelayRefreshesBeforeExpiry(t *testing.T) {
 	now := time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC)
 	expire := now.Add(10 * time.Minute)

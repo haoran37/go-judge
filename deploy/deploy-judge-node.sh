@@ -128,6 +128,14 @@ yaml_quote() {
   printf '"%s"' "${value}"
 }
 
+json_quote() {
+  local value="${1:-}"
+  [[ "${value}" != *$'\n'* ]] || fail "JSON scalar contains newline"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
 validate_node_type() {
   case "$1" in
     formal|temp) return 0 ;;
@@ -194,6 +202,99 @@ preflight() {
   prepare_dirs
 }
 
+parse_temp_token_response() {
+  local response_file="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "${response_file}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+
+code = payload.get("code")
+data = payload.get("data") or {}
+token = data.get("token") or ""
+if code != 200 or not token:
+    msg = payload.get("msg") or "empty token"
+    raise SystemExit(f"temp token exchange failed: {msg}")
+
+values = [
+    token,
+    data.get("tokenType") or "Bearer",
+    data.get("nodeId") or "",
+    data.get("tokenId") or "",
+    data.get("expireTime") or "",
+]
+print("\t".join(values))
+PY
+    return
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '
+      if (.code != 200 or ((.data.token // "") == "")) then
+        error("temp token exchange failed: " + (.msg // "empty token"))
+      else
+        [
+          .data.token,
+          (.data.tokenType // "Bearer"),
+          (.data.nodeId // ""),
+          (.data.tokenId // ""),
+          (.data.expireTime // "")
+        ] | @tsv
+      end
+    ' "${response_file}"
+    return
+  fi
+
+  fail "temp token exchange requires python3 or jq to parse backend JSON"
+}
+
+exchange_temp_token() {
+  local backend_url="$1"
+  local node_name="$2"
+  local auth_code="$3"
+  local endpoint="${backend_url%/}/api/judge/temp-token"
+  local request_body
+  local response_file
+  local http_code
+  local parsed
+
+  require_command curl
+  request_body='{"authCode":'"$(json_quote "${auth_code}")"',"nodeName":'"$(json_quote "${node_name}")"'}'
+  response_file="$(mktemp "${CONFIG_DIR}/temp-token-response.XXXXXX")"
+
+  if ! http_code="$(curl -sS --connect-timeout 10 --max-time 30 \
+    -o "${response_file}" \
+    -w '%{http_code}' \
+    -H 'Content-Type: application/json' \
+    -X POST \
+    --data "${request_body}" \
+    "${endpoint}")"; then
+    rm -f "${response_file}"
+    warn "request to ${endpoint} failed"
+    return 1
+  fi
+
+  if [[ ! "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
+    warn "temp token exchange HTTP ${http_code}: $(tr -d '\r\n' < "${response_file}")"
+    rm -f "${response_file}"
+    return 1
+  fi
+
+  if ! parsed="$(parse_temp_token_response "${response_file}")"; then
+    rm -f "${response_file}"
+    return 1
+  fi
+  rm -f "${response_file}"
+
+  IFS=$'\t' read -r TEMP_JWT TEMP_TOKEN_TYPE TEMP_NODE_ID TEMP_TOKEN_ID TEMP_EXPIRE_TIME <<< "${parsed}"
+  [[ -n "${TEMP_JWT}" ]] || return 1
+  log "temp token exchange succeeded; jwt expires at ${TEMP_EXPIRE_TIME:-unknown}"
+}
+
 write_config_file() {
   local node_name="$1"
   local node_type="$2"
@@ -206,11 +307,16 @@ write_config_file() {
   local rabbit_password="$9"
   local rabbit_vhost="${10}"
   local auth_code="${11}"
-  local nacos_server="${12}"
-  local nacos_namespace="${13}"
-  local remote_enabled="${14}"
-  local formal_token_group="${15}"
-  local formal_token_data_id="${16}"
+  local temp_jwt="${12}"
+  local temp_token_type="${13}"
+  local temp_node_id="${14}"
+  local temp_token_id="${15}"
+  local temp_expire_time="${16}"
+  local nacos_server="${17}"
+  local nacos_namespace="${18}"
+  local remote_enabled="${19}"
+  local formal_token_group="${20}"
+  local formal_token_data_id="${21}"
 
   local tmp_file
   tmp_file="$(mktemp "${CONFIG_DIR}/config.yaml.tmp.XXXXXX")"
@@ -248,6 +354,11 @@ hnieoj:
       dataId: $(yaml_quote "${formal_token_data_id}")
   tempToken:
     authCode: $(yaml_quote "${auth_code}")
+    jwt: $(yaml_quote "${temp_jwt}")
+    tokenType: $(yaml_quote "${temp_token_type}")
+    nodeId: $(yaml_quote "${temp_node_id}")
+    tokenId: $(yaml_quote "${temp_token_id}")
+    expireTime: $(yaml_quote "${temp_expire_time}")
 
 rabbitmq:
   host: $(yaml_quote "${rabbit_host}")
@@ -319,6 +430,11 @@ init_config() {
   local rabbit_username
   local rabbit_password
   local rabbit_vhost
+  local temp_jwt=""
+  local temp_token_type=""
+  local temp_node_id=""
+  local temp_token_id=""
+  local temp_expire_time=""
   local nacos_server=""
   local nacos_namespace=""
   local auth_code=""
@@ -353,12 +469,24 @@ init_config() {
       chmod 600 "${PRIVATE_KEY_FILE}" 2>/dev/null || true
     fi
   else
-    auth_code="$(prompt_required "Temp node auth code")"
+    while true; do
+      auth_code="$(prompt_secret_required "Temp node auth code")"
+      if exchange_temp_token "${backend_url}" "${node_name}" "${auth_code}"; then
+        temp_jwt="${TEMP_JWT}"
+        temp_token_type="${TEMP_TOKEN_TYPE}"
+        temp_node_id="${TEMP_NODE_ID}"
+        temp_token_id="${TEMP_TOKEN_ID}"
+        temp_expire_time="${TEMP_EXPIRE_TIME}"
+        break
+      fi
+      warn "invalid or expired temp auth code; please enter it again"
+    done
   fi
 
   write_config_file "${node_name}" "${node_type}" "${max_concurrency}" "${supported_modes}" "${backend_url}" \
     "${rabbit_host}" "${rabbit_port}" "${rabbit_username}" "${rabbit_password}" "${rabbit_vhost}" \
-    "${auth_code}" "${nacos_server}" "${nacos_namespace}" "${remote_enabled}" \
+    "${auth_code}" "${temp_jwt}" "${temp_token_type}" "${temp_node_id}" "${temp_token_id}" "${temp_expire_time}" \
+    "${nacos_server}" "${nacos_namespace}" "${remote_enabled}" \
     "${formal_token_group}" "${formal_token_data_id}"
 }
 

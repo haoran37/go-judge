@@ -90,7 +90,7 @@ func Authenticate(ctx context.Context, cfg config.Config, client *http.Client) (
 		startFormalTokenRefresher(ctx, cfg.HnieOJ.FormalToken, client, cred)
 		return cred, nil
 	case "temp":
-		cred, err := exchangeTempToken(ctx, cfg, client)
+		cred, err := resolveTempCredential(ctx, cfg, client)
 		if err != nil {
 			return nil, err
 		}
@@ -151,6 +151,9 @@ func startFormalTokenRefresher(ctx context.Context, cfg config.FormalToken, clie
 }
 
 func startTempTokenRefresher(ctx context.Context, cfg config.Config, client *http.Client, cred *Credential) {
+	if cfg.HnieOJ.TempToken.AuthCode == "" {
+		return
+	}
 	go func() {
 		for {
 			wait := tempRefreshDelay(cred.ExpiresAt(), time.Now())
@@ -177,6 +180,35 @@ func startTempTokenRefresher(ctx context.Context, cfg config.Config, client *htt
 			cred.Replace(next)
 		}
 	}()
+}
+
+func resolveTempCredential(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
+	if strings.TrimSpace(cfg.HnieOJ.TempToken.JWT) != "" {
+		return credentialFromTempTokenConfig(cfg.HnieOJ.TempToken)
+	}
+	return exchangeTempToken(ctx, cfg, client)
+}
+
+func credentialFromTempTokenConfig(cfg config.TempToken) (*Credential, error) {
+	token := strings.TrimSpace(cfg.JWT)
+	if token == "" {
+		return nil, errors.New("temp jwt is required")
+	}
+	tokenType := strings.TrimSpace(cfg.TokenType)
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+	expireTime, err := parseExpireTime(cfg.ExpireTime)
+	if err != nil {
+		return nil, err
+	}
+	return &Credential{
+		HeaderName:  "Authorization",
+		HeaderValue: tokenType + " " + token,
+		NodeID:      strings.TrimSpace(cfg.NodeID),
+		TokenID:     strings.TrimSpace(cfg.TokenID),
+		ExpireTime:  expireTime,
+	}, nil
 }
 
 func tempRefreshDelay(expireTime, now time.Time) time.Duration {

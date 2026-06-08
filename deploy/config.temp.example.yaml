@@ -22,6 +22,11 @@ hnieoj:
       dataId: ""
   tempToken:
     authCode: "replace_me"
+    jwt: ""
+    tokenType: "Bearer"
+    nodeId: ""
+    tokenId: ""
+    expireTime: ""
 
 rabbitmq:
   host: "127.0.0.1"
