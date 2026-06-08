@@ -27,16 +27,48 @@ log() {
 }
 
 warn() {
-  printf 'Warning: %s\n' "$*" >&2
+  printf '警告：%s\n' "$*" >&2
 }
 
 fail() {
-  printf 'Error: %s\n' "$*" >&2
+  printf '错误：%s\n' "$*" >&2
   exit 1
 }
 
 require_command() {
-  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+  command -v "$1" >/dev/null 2>&1 || fail "缺少命令：$1"
+}
+
+check_ubuntu() {
+  local os_id=""
+  local os_pretty=""
+  [[ -r /etc/os-release ]] || fail "当前只兼容 Ubuntu，未找到 /etc/os-release"
+  # 读取系统发行版标识，用于限制当前脚本只在 Ubuntu 上运行。
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  os_id="${ID:-}"
+  os_pretty="${PRETTY_NAME:-未知 Linux}"
+  [[ "${os_id}" == "ubuntu" ]] || fail "当前只兼容 Ubuntu，当前系统为：${os_pretty}"
+}
+
+check_default_path_permissions() {
+  local path
+  if [[ "${EUID}" -eq 0 ]]; then
+    return
+  fi
+  for path in "${CONFIG_DIR}" "${SECURITY_DIR}" "${CACHE_DIR}"; do
+    case "${path}" in
+      /etc/*|/data/*|/var/*)
+        fail "默认部署目录 ${path} 需要 root 权限；请使用 sudo 执行，或通过 CONFIG_DIR/SECURITY_DIR/CACHE_DIR 指定其他目录"
+        ;;
+    esac
+  done
+}
+
+check_docker() {
+  require_command docker
+  docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 插件不可用，请先安装 Docker Compose v2 plugin"
+  docker info >/dev/null 2>&1 || fail "无法连接 Docker daemon，请确认 Docker 已启动，且当前用户有权限访问 Docker"
 }
 
 docker_compose() {
@@ -78,7 +110,7 @@ prompt_required() {
       printf '%s' "${value}"
       return
     fi
-    warn "value is required"
+    warn "该项不能为空"
   done
 }
 
@@ -93,7 +125,7 @@ prompt_secret_required() {
       printf '%s' "${value}"
       return
     fi
-    warn "value is required"
+    warn "该项不能为空"
   done
 }
 
@@ -107,7 +139,7 @@ prompt_positive_int() {
       printf '%s' "${value}"
       return
     fi
-    warn "enter a positive integer"
+    warn "请输入正整数"
   done
 }
 
@@ -124,7 +156,7 @@ confirm() {
 
 yaml_quote() {
   local value="${1:-}"
-  [[ "${value}" != *$'\n'* ]] || fail "YAML scalar contains newline"
+  [[ "${value}" != *$'\n'* ]] || fail "YAML 字段不能包含换行"
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf '"%s"' "${value}"
@@ -132,7 +164,7 @@ yaml_quote() {
 
 json_quote() {
   local value="${1:-}"
-  [[ "${value}" != *$'\n'* ]] || fail "JSON scalar contains newline"
+  [[ "${value}" != *$'\n'* ]] || fail "JSON 字段不能包含换行"
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf '"%s"' "${value}"
@@ -141,7 +173,7 @@ json_quote() {
 validate_node_type() {
   case "$1" in
     formal|temp) return 0 ;;
-    *) fail "unsupported node type: $1" ;;
+    *) fail "不支持的节点类型：$1" ;;
   esac
 }
 
@@ -167,7 +199,7 @@ normalize_modes_csv() {
     case "${part}" in
       default|spj|interactive) ;;
       "") continue ;;
-      *) fail "unsupported judge mode: ${part}" ;;
+      *) fail "不支持的判题模式：${part}" ;;
     esac
     if ! array_contains "${part}" "${out[@]}"; then
       out+=("${part}")
@@ -194,13 +226,13 @@ prepare_dirs() {
 }
 
 check_source_tree() {
-  [[ -f "${SOURCE_DIR}/Dockerfile.hnieoj" ]] || fail "Dockerfile.hnieoj not found under ${SOURCE_DIR}"
+  [[ -f "${SOURCE_DIR}/Dockerfile.hnieoj" ]] || fail "在 ${SOURCE_DIR} 下未找到 Dockerfile.hnieoj；远程下载脚本只支持拉取镜像部署，本地构建请在源码仓库中执行"
 }
 
 preflight() {
-  require_command docker
-  docker compose version >/dev/null 2>&1 || fail "docker compose plugin is not available"
-  check_source_tree
+  check_ubuntu
+  check_default_path_permissions
+  check_docker
   prepare_dirs
 }
 
@@ -219,8 +251,8 @@ code = payload.get("code")
 data = payload.get("data") or {}
 token = data.get("token") or ""
 if code != 200 or not token:
-    msg = payload.get("msg") or "empty token"
-    raise SystemExit(f"temp token exchange failed: {msg}")
+    msg = payload.get("msg") or "空 token"
+    raise SystemExit(f"临时令牌兑换失败：{msg}")
 
 values = [
     token,
@@ -237,7 +269,7 @@ PY
   if command -v jq >/dev/null 2>&1; then
     jq -r '
       if (.code != 200 or ((.data.token // "") == "")) then
-        error("temp token exchange failed: " + (.msg // "empty token"))
+        error("临时令牌兑换失败：" + (.msg // "空 token"))
       else
         [
           .data.token,
@@ -251,7 +283,7 @@ PY
     return
   fi
 
-  fail "temp token exchange requires python3 or jq to parse backend JSON"
+  fail "临时令牌兑换需要 python3 或 jq 来解析后端 JSON 响应"
 }
 
 exchange_temp_token() {
@@ -276,12 +308,12 @@ exchange_temp_token() {
     --data "${request_body}" \
     "${endpoint}")"; then
     rm -f "${response_file}"
-    warn "request to ${endpoint} failed"
+    warn "请求 ${endpoint} 失败"
     return 1
   fi
 
   if [[ ! "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
-    warn "temp token exchange HTTP ${http_code}: $(tr -d '\r\n' < "${response_file}")"
+    warn "临时令牌兑换返回 HTTP ${http_code}: $(tr -d '\r\n' < "${response_file}")"
     rm -f "${response_file}"
     return 1
   fi
@@ -294,7 +326,7 @@ exchange_temp_token() {
 
   IFS=$'\t' read -r TEMP_JWT TEMP_TOKEN_TYPE TEMP_NODE_ID TEMP_TOKEN_ID TEMP_EXPIRE_TIME <<< "${parsed}"
   [[ -n "${TEMP_JWT}" ]] || return 1
-  log "temp token exchange succeeded; jwt expires at ${TEMP_EXPIRE_TIME:-unknown}"
+  log "临时令牌兑换成功，JWT 过期时间：${TEMP_EXPIRE_TIME:-未知}"
 }
 
 write_config_file() {
@@ -432,24 +464,25 @@ EOF
 
   chmod 600 "${tmp_file}" 2>/dev/null || true
   mv "${tmp_file}" "${CONFIG_FILE}"
-  log "wrote config: ${CONFIG_FILE}"
+  log "已写入配置文件：${CONFIG_FILE}"
 }
 
 init_config() {
-  check_source_tree
+  check_ubuntu
+  check_default_path_permissions
   prepare_dirs
   if [[ -f "${CONFIG_FILE}" ]] && ! is_true "${FORCE:-false}"; then
-    confirm "Overwrite existing ${CONFIG_FILE}?" || fail "configuration was not changed"
+    confirm "是否覆盖已有配置文件 ${CONFIG_FILE}？" || fail "配置未修改"
   fi
 
   local node_type_choice
   local node_type
   while true; do
-    node_type_choice="$(prompt "Node type: 1=formal, 2=temp" "1")"
+    node_type_choice="$(prompt "节点类型：1=formal，2=temp" "1")"
     case "${node_type_choice}" in
       1|formal) node_type="formal"; break ;;
       2|temp) node_type="temp"; break ;;
-      *) warn "enter 1, 2, formal, or temp" ;;
+      *) warn "请输入 1、2、formal 或 temp" ;;
     esac
   done
 
@@ -474,35 +507,35 @@ init_config() {
   local formal_token_group=""
   local formal_token_data_id=""
 
-  node_name="$(prompt "Node name" "judge-node-01")"
-  max_concurrency="$(prompt_positive_int "Max concurrent tasks" "2")"
-  supported_modes="$(normalize_modes_csv "$(prompt "Supported judge modes" "default")")"
-  backend_url="$(prompt "HNieOJ backend base URL" "http://127.0.0.1:8800")"
-  rabbit_host="$(prompt "RabbitMQ host" "127.0.0.1")"
-  rabbit_port="$(prompt_positive_int "RabbitMQ port" "5672")"
-  rabbit_username="$(prompt "RabbitMQ username" "hnieoj_judge")"
-  rabbit_password="$(prompt_secret_required "RabbitMQ password")"
-  rabbit_vhost="$(prompt "RabbitMQ virtual host" "hnieoj")"
+  node_name="$(prompt "节点名称" "judge-node-01")"
+  max_concurrency="$(prompt_positive_int "最大并发判题任务数" "2")"
+  supported_modes="$(normalize_modes_csv "$(prompt "支持的判题模式" "default")")"
+  backend_url="$(prompt "HNieOJ 后端基础地址" "http://127.0.0.1:8800")"
+  rabbit_host="$(prompt "RabbitMQ 主机" "127.0.0.1")"
+  rabbit_port="$(prompt_positive_int "RabbitMQ 端口" "5672")"
+  rabbit_username="$(prompt "RabbitMQ 用户名" "hnieoj_judge")"
+  rabbit_password="$(prompt_secret_required "RabbitMQ 密码")"
+  rabbit_vhost="$(prompt "RabbitMQ 虚拟主机" "hnieoj")"
 
   if [[ "${node_type}" == "formal" ]]; then
-    nacos_server="$(prompt "Nacos server URL" "http://127.0.0.1:8848")"
-    nacos_namespace="$(prompt "Nacos namespace" "dev")"
-    remote_enabled="$(prompt "Enable remote runtime config from Nacos" "true")"
+    nacos_server="$(prompt "Nacos 服务地址" "http://127.0.0.1:8848")"
+    nacos_namespace="$(prompt "Nacos 命名空间" "dev")"
+    remote_enabled="$(prompt "是否启用 Nacos 远程运行配置，填写 true 或 false" "true")"
     case "${remote_enabled}" in
       true|false) ;;
-      *) fail "remote config must be true or false" ;;
+      *) fail "远程运行配置只能填写 true 或 false" ;;
     esac
-    formal_token_group="$(prompt "Formal token Nacos group" "HNIEOJ_SECRET_GROUP")"
-    formal_token_data_id="$(prompt "Formal token Nacos dataId" "hnieoj-judge-formal-token.yaml")"
+    formal_token_group="$(prompt "formal token 的 Nacos group" "HNIEOJ_SECRET_GROUP")"
+    formal_token_data_id="$(prompt "formal token 的 Nacos dataId" "hnieoj-judge-formal-token.yaml")"
     if [[ ! -f "${PRIVATE_KEY_FILE}" ]]; then
-      warn "formal private key is not present yet: ${PRIVATE_KEY_FILE}"
-      warn "copy it before starting the node"
+      warn "formal 私钥尚不存在：${PRIVATE_KEY_FILE}"
+      warn "请在启动节点前复制私钥到该路径"
     else
       chmod 600 "${PRIVATE_KEY_FILE}" 2>/dev/null || true
     fi
   else
     while true; do
-      auth_code="$(prompt_secret_required "Temp node auth code")"
+      auth_code="$(prompt_secret_required "临时节点授权码")"
       if exchange_temp_token "${backend_url}" "${node_name}" "${auth_code}"; then
         temp_jwt="${TEMP_JWT}"
         temp_token_type="${TEMP_TOKEN_TYPE}"
@@ -511,7 +544,7 @@ init_config() {
         temp_expire_time="${TEMP_EXPIRE_TIME}"
         break
       fi
-      warn "invalid or expired temp auth code; please enter it again"
+      warn "临时授权码无效或已过期，请重新输入"
     done
   fi
 
@@ -523,9 +556,10 @@ init_config() {
 }
 
 render_compose() {
-  check_source_tree
+  check_ubuntu
+  check_default_path_permissions
   prepare_dirs
-  [[ -f "${CONFIG_FILE}" ]] || fail "missing config file: ${CONFIG_FILE}; run '$0 init' first"
+  [[ -f "${CONFIG_FILE}" ]] || fail "缺少配置文件：${CONFIG_FILE}；请先执行 '$0 init'"
 
   local tmp_file
   tmp_file="$(mktemp "${CONFIG_DIR}/compose.yaml.tmp.XXXXXX")"
@@ -588,29 +622,30 @@ EOF
 
   chmod 600 "${tmp_file}" 2>/dev/null || true
   mv "${tmp_file}" "${COMPOSE_FILE}"
-  log "wrote compose file: ${COMPOSE_FILE}"
+  log "已写入 Compose 文件：${COMPOSE_FILE}"
 }
 
 doctor() {
   preflight
-  [[ -f "${CONFIG_FILE}" ]] || fail "missing config file: ${CONFIG_FILE}"
-  [[ -f "${COMPOSE_FILE}" ]] || fail "compose file is missing: ${COMPOSE_FILE}; run '$0 render'"
+  [[ -f "${CONFIG_FILE}" ]] || fail "缺少配置文件：${CONFIG_FILE}"
+  [[ -f "${COMPOSE_FILE}" ]] || fail "缺少 Compose 文件：${COMPOSE_FILE}；请执行 '$0 render'"
   if grep -Eq 'type:[[:space:]]*"?formal"?' "${CONFIG_FILE}" && [[ ! -f "${PRIVATE_KEY_FILE}" ]]; then
-    fail "formal node private key is missing: ${PRIVATE_KEY_FILE}"
+    fail "formal 节点私钥缺失：${PRIVATE_KEY_FILE}"
   fi
   docker_compose config >/dev/null
-  log "preflight checks passed"
+  log "预检查通过"
 }
 
 build_image() {
   preflight
-  log "building image: ${IMAGE}"
+  check_source_tree
+  log "正在构建镜像：${IMAGE}"
   docker build -f "${SOURCE_DIR}/Dockerfile.hnieoj" -t "${IMAGE}" "${SOURCE_DIR}"
 }
 
 pull_image() {
   preflight
-  log "pulling image: ${IMAGE}"
+  log "正在拉取镜像：${IMAGE}"
   docker pull "${IMAGE}"
 }
 
@@ -624,7 +659,7 @@ up() {
 deploy() {
   preflight
   if [[ ! -f "${CONFIG_FILE}" ]]; then
-    log "config file not found; starting interactive initialization"
+    log "未找到配置文件，开始交互式初始化"
     init_config
   fi
   render_compose
@@ -632,29 +667,29 @@ deploy() {
   doctor
   docker_compose up -d --force-recreate --remove-orphans
   docker_compose ps
-  log "deployment completed"
+  log "部署完成"
 }
 
 usage() {
   cat <<EOF
-Usage:
+用法：
   bash deploy/deploy-judge-node.sh <command>
 
-Commands:
-  deploy        Initialize config when missing, render compose, pull image, and recreate services.
-  init          Interactively write ${CONFIG_FILE}.
-  render        Render ${COMPOSE_FILE} from current environment and config path.
-  doctor        Validate Docker, config, compose, and formal-node key requirements.
-  pull          Pull ${IMAGE} from Docker Hub.
-  build         Build ${IMAGE} locally from Dockerfile.hnieoj.
-  up            Render compose and start services.
-  restart       Restart services.
-  ps            Show service status.
-  logs          Follow logs. Pass service names after the command if needed.
-  down          Stop and remove services.
-  help          Show this help.
+命令：
+  deploy        配置缺失时先初始化，然后渲染 Compose、拉取镜像并重建服务。
+  init          交互式写入 ${CONFIG_FILE}。
+  render        按当前环境变量和配置路径渲染 ${COMPOSE_FILE}。
+  doctor        检查 Docker、配置文件、Compose 文件和 formal 节点私钥。
+  pull          从 Docker Hub 拉取 ${IMAGE}。
+  build         在源码仓库中基于 Dockerfile.hnieoj 构建 ${IMAGE}。
+  up            渲染 Compose 并启动服务。
+  restart       重启服务。
+  ps            查看服务状态。
+  logs          跟随日志；可在命令后追加服务名。
+  down          停止并删除服务。
+  help          显示帮助。
 
-Useful environment variables:
+常用环境变量：
   IMAGE_REPOSITORY=${IMAGE_REPOSITORY}
   IMAGE_TAG=${IMAGE_TAG}
   IMAGE=${IMAGE}
@@ -667,7 +702,7 @@ Useful environment variables:
   GOJUDGE_BIND_ADDR=${GOJUDGE_BIND_ADDR}
   GOJUDGE_PUBLIC_PORT=${GOJUDGE_PUBLIC_PORT}
 
-Examples:
+示例：
   bash deploy/deploy-judge-node.sh init
   bash deploy/deploy-judge-node.sh deploy
   IMAGE_TAG=sha-abcdef0 bash deploy/deploy-judge-node.sh deploy
@@ -692,7 +727,7 @@ main() {
     logs) docker_compose logs -f --tail="${TAIL:-200}" "$@" ;;
     down) docker_compose down "$@" ;;
     help|-h|--help) usage ;;
-    *) usage; fail "unknown command: ${command}" ;;
+    *) usage; fail "未知命令：${command}" ;;
   esac
 }
 

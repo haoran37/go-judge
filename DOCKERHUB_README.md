@@ -1,98 +1,53 @@
-# HNieOJ go-judge
+# HNieOJ go-judge 判题机镜像
 
-Docker image for HNieOJ judge nodes. It contains:
+这是 HNieOJ 判题节点镜像，基于 [criyle/go-judge](https://github.com/criyle/go-judge) 二次开发，包含：
 
-- `go-judge`: sandbox service.
-- `hnieoj-judge-node`: HNieOJ adapter for authentication, RabbitMQ task consumption, testdata cache, go-judge execution, heartbeat, and event reporting.
-- C, C++17, Java 17, and Python 3 runtime toolchains.
+- `go-judge` 沙箱服务；
+- `hnieoj-judge-node` 判题节点适配层；
+- C、C++17、Java 17、Python 3 判题工具链。
 
-Image repository:
+相关项目：
+
+- HNieOJ 后端：[https://github.com/haoran37/HNieOJ-backend](https://github.com/haoran37/HNieOJ-backend)
+- HNieOJ 前端：[https://github.com/haoran37/HNieOJ](https://github.com/haoran37/HNieOJ)
+- API 文档：[https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8](https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8)
+
+## 镜像标签
 
 ```text
-haoran37/hnieoj-go-judge
+haoran37/hnieoj-go-judge:latest
+haoran37/hnieoj-go-judge:sha-<commit>
 ```
 
-Tags:
+`latest` 来自 `master` 分支最新构建；生产环境建议使用 `sha-<commit>` 固定标签。
 
-- `latest`: latest image built from the `master` branch.
-- `sha-xxxxxxx`: immutable image for a specific Git commit.
+## Ubuntu 一句话部署
 
-## Security Updates
-
-This image is built and pushed only when the repository `master` branch changes. Daily development should happen on `develop` or feature branches, then merge to `master` for a release build.
-
-For production:
-
-- Prefer an immutable `sha-xxxxxxx` tag instead of floating `latest`.
-- Rebuild and redeploy after dependency or Debian security updates.
-- The image build upgrades Debian packages during build, but CVEs without upstream fixed packages may still appear in Docker Hub scans until Debian publishes a patched package or the base image is changed.
-- Do not expose the sandbox HTTP port directly to the public Internet.
-
-## Recommended Deployment
-
-Use the deployment wrapper from the repository:
+当前部署脚本只适配 Ubuntu，会检查 Docker、Docker Compose v2 插件和 Docker daemon 状态。
 
 ```bash
-IMAGE_TAG=latest bash deploy/deploy-judge-node.sh deploy
+curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/master/deploy/deploy-judge-node.sh -o /tmp/hnieoj-judge-node.sh && sudo IMAGE_TAG=latest bash /tmp/hnieoj-judge-node.sh deploy
 ```
 
-Use a fixed commit tag for safer production rollout:
+指定固定版本：
 
 ```bash
-IMAGE_TAG=sha-xxxxxxx bash deploy/deploy-judge-node.sh deploy
+curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/master/deploy/deploy-judge-node.sh -o /tmp/hnieoj-judge-node.sh && sudo IMAGE_TAG=sha-xxxxxxx bash /tmp/hnieoj-judge-node.sh deploy
 ```
 
-The script will:
+## 部署脚本做什么
 
-- create or reuse `/etc/hnieoj/go-judge/config.yaml`;
-- render `/etc/hnieoj/go-judge/compose.yaml`;
-- pull `haoran37/hnieoj-go-judge:<tag>`;
-- validate configuration;
-- recreate old containers with the new image.
+- 交互式生成 `/etc/hnieoj/go-judge/config.yaml`。
+- temp 节点启动前先用授权码兑换 JWT，失败会立即要求重新输入。
+- 渲染 `/etc/hnieoj/go-judge/compose.yaml`。
+- 拉取指定 Docker Hub 镜像。
+- 校验配置和 Docker 环境。
+- 重建旧容器。
 
-## Manual Deployment Notes
+## 注意事项
 
-Manual `docker run` or handwritten Compose deployment is possible, but you must handle these details yourself:
-
-- Run `go-judge` with `--privileged`.
-- Keep `-file-timeout` enabled, for example `-file-timeout=30m`, to avoid filestore accumulation.
-- Mount `mount.yaml` into the sandbox container or use the image default path.
-- Mount the HNieOJ config file into the judge-node container.
-- Mount formal-node private keys read-only when using formal nodes.
-- Mount a persistent testdata cache directory.
-- Do not expose the go-judge HTTP port to the public Internet.
-- For temp nodes, validate `authCode` before starting the container.
-
-The deployment script performs temp-node preflight token exchange:
-
-```http
-POST /api/judge/temp-token
-```
-
-It writes the returned JWT into `hnieoj.tempToken.jwt` before the container starts. If you bypass the script, invalid temp auth codes may only be discovered after the container starts unless you implement the same preflight step.
-
-## Example
-
-```bash
-docker pull haoran37/hnieoj-go-judge:latest
-
-IMAGE=haoran37/hnieoj-go-judge:latest \
-bash deploy/deploy-judge-node.sh deploy
-```
-
-## Judge Modes
-
-The node supports:
-
-- `default`
-- `spj`
-- `interactive`
-
-Production nodes advertise enabled modes through heartbeat `supportedJudgeModes`. Keep the default as `default` unless the backend and problem data have been verified for SPJ or interactive judging.
-
-## Documentation
-
-See repository docs:
-
-- `docs/HNIEOJ_DEPLOYMENT_MANUAL_CN.md`
-- `docs/HNIEOJ_SPJ_INTERACTIVE_CONTRACT.md`
+- 不要将沙箱 HTTP 端口暴露到公网。
+- 保持 `-file-timeout` 开启，避免临时文件长期堆积。
+- formal 节点需要挂载私钥到 `/etc/hnieoj/judge-security/judge_formal_private.pem`。
+- SPJ 和交互题需要后端、题目数据和节点联调完成后再开启。
+- 镜像构建会升级 Debian 系统包；若 Docker Hub 扫描仍显示 CVE，通常需要等待 Debian 发布修复包或后续切换基础镜像。
