@@ -14,9 +14,11 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/go-judge ./cmd/go-judge \
 
 FROM debian:bookworm-slim
 
+ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Shanghai
 
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \

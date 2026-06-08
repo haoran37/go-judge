@@ -17,6 +17,17 @@ Tags:
 - `latest`: latest image built from the `master` branch.
 - `sha-xxxxxxx`: immutable image for a specific Git commit.
 
+## Security Updates
+
+This image is built and pushed only when the repository `master` branch changes. Daily development should happen on `develop` or feature branches, then merge to `master` for a release build.
+
+For production:
+
+- Prefer an immutable `sha-xxxxxxx` tag instead of floating `latest`.
+- Rebuild and redeploy after dependency or Debian security updates.
+- The image build upgrades Debian packages during build, but CVEs without upstream fixed packages may still appear in Docker Hub scans until Debian publishes a patched package or the base image is changed.
+- Do not expose the sandbox HTTP port directly to the public Internet.
+
 ## Recommended Deployment
 
 Use the deployment wrapper from the repository:

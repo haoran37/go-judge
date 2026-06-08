@@ -2,9 +2,13 @@
 # formal 节点用于长期在线生产判题，依赖本地私钥和 Nacos 中的 formal token 密文。
 
 node:
+  # 节点名称。建议在 HNieOJ 集群内唯一，便于心跳、日志和故障定位。
   name: judge-node-01
+  # formal 表示正式长期节点；不要把临时节点授权码填到 formal 节点配置中。
   type: formal
+  # 最大并发判题数。建议与宿主机 CPU、内存和 go-judge 沙箱并发能力匹配。
   maxConcurrency: 2
+  # 节点声明支持的判题模式。未完成后端、题目数据和节点联调前只保留 default。
   supportedJudgeModes:
     - default
 
@@ -12,25 +16,32 @@ remoteConfig:
   # formal 节点通常开启远程运行配置，用于统一调整心跳、缓存、MQ 重试等非敏感参数。
   enabled: true
   nacos:
+    # Nacos 地址、命名空间、分组和 dataId 必须与后端发布的判题节点配置一致。
     serverAddr: "http://127.0.0.1:8848"
     namespace: "dev"
     group: "HNIEOJ_JUDGE_GROUP"
     dataId: "hnieoj-judge-node.yaml"
 
 hnieoj:
+  # HNieOJ 后端网关地址。容器网络部署时通常填写后端服务名或网关服务名。
   baseUrl: "http://gateway:8800"
+  # 节点访问后端认证、测试数据、事件上报、心跳接口的 HTTP 超时。
   requestTimeout: "30s"
   formalToken:
     # 容器内私钥路径，由部署脚本从宿主机 /etc/hnieoj/judge-security 挂载。
     privateKeyPath: "/etc/hnieoj/judge-security/judge_formal_private.pem"
+    # formal token 密文解密算法，需要与后端生成 token 的算法保持一致。
     cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
+    # formal 节点轮询 Nacos 中 token 密文的间隔。
     refreshInterval: "30s"
     nacos:
+      # 存放 formal token 密文的 Nacos 配置位置，通常与普通远程配置分组隔离。
       serverAddr: "http://127.0.0.1:8848"
       namespace: "dev"
       group: "HNIEOJ_SECRET_GROUP"
       dataId: "hnieoj-judge-formal-token.yaml"
   tempToken:
+    # formal 节点不使用 tempToken，保持为空即可。
     authCode: ""
     jwt: ""
     tokenType: ""
@@ -39,37 +50,52 @@ hnieoj:
     expireTime: ""
 
 rabbitmq:
+  # RabbitMQ 连接信息。不要把生产密码提交到仓库。
   host: "rabbitmq"
   port: 5672
   username: "hnieoj_judge"
   password: "replace_me"
   virtualHost: "hnieoj"
+  # 判题任务交换机、队列和路由键，需要与后端发布任务配置一致。
   exchange: "hnieoj.judge.exchange"
   queue: "hnieoj.judge.task"
   routingKey: "judge.submission.created"
+  # 死信队列配置。超过 maxRetries 后任务进入 DLQ，便于人工排查。
   deadLetterExchange: "hnieoj.judge.dlx"
   deadLetterQueue: "hnieoj.judge.task.dlq"
   deadLetterRoutingKey: "judge.submission.created.dlq"
+  # RabbitMQ 预取数量。通常与 node.maxConcurrency 保持一致。
   prefetch: 2
+  # 可重试错误的最大重试次数和重试退避时间。
   maxRetries: 3
   retryBackoff: "10s"
 
 testdata:
+  # 测试数据缓存目录。部署脚本会挂载宿主机持久化目录到该路径。
   cacheRoot: "/data/oj/judge-cache"
+  # 缓存容量上限，超过后清理最久未使用的测试数据。
   maxCacheBytes: 21474836480
+  # 测试数据多久未使用后可被清理。
   maxUnusedDuration: "72h"
+  # 缓存清理任务执行间隔。
   cleanupInterval: "1h"
+  # 心跳中的缓存和磁盘统计采样间隔，避免每次心跳都扫描磁盘。
   statsInterval: "5m"
 
 gojudge:
+  # go-judge sandbox 服务地址。compose 部署时通常使用容器服务名。
   endpoint: "http://go-judge-sandbox:5050"
+  # 如果 sandbox 启动时配置了 -auth-token，这里填写相同 token。
   authToken: ""
 
 reporter:
+  # 事件上报模式。生产环境使用 http，本地调试可使用 log/mock。
   mode: "http"
   endpoint: "/judge/submissions/{submissionId}/events"
 
 heartbeat:
+  # 生产环境建议开启心跳，后端依赖心跳判断节点在线和能力。
   enabled: true
   endpoint: "/judge/nodes/heartbeat"
+  # 建议保持 30 秒左右，不要调到 1 秒级，避免给后端造成不必要压力。
   interval: "30s"

@@ -27,6 +27,8 @@ haoran37/hnieoj-go-judge:latest
 haoran37/hnieoj-go-judge:sha-<commit>
 ```
 
+Development follows a simple Git Flow: work lands on `develop` first, and Docker Hub publishing happens only after merging to `master`.
+
 Recommended deployment uses the wrapper script:
 
 ```bash
@@ -40,6 +42,8 @@ IMAGE_TAG=sha-xxxxxxx bash deploy/deploy-judge-node.sh deploy
 ```
 
 Manual Docker or Compose deployment is possible, but temp judge nodes need a preflight `authCode` to JWT exchange before the container starts. The deployment script performs this check and writes `hnieoj.tempToken.jwt`; manual deployments must handle the same step or keep the container-side fallback behavior. Also keep go-judge `-file-timeout` enabled and do not expose the sandbox HTTP port publicly.
+
+For production rollouts, prefer immutable `sha-<commit>` tags and rebuild after Go module or Debian security updates. The HNieOJ image upgrades Debian packages during build, but scanner findings can remain when Debian has not published a fixed package yet.
 
 ### REST API
 

@@ -2,19 +2,27 @@
 # temp 节点适合临时扩容或短期比赛。部署脚本会先用 authCode 兑换 JWT，成功后再启动容器。
 
 node:
+  # 节点名称。临时节点也建议唯一，便于后端识别和赛后清理。
   name: judge-node-temp-01
+  # temp 表示临时节点，依赖后端签发的临时授权码和 JWT。
   type: temp
+  # 最大并发判题数。临时扩容时不要超过宿主机实际承载能力。
   maxConcurrency: 2
+  # 节点声明支持的判题模式。未完成 SPJ/交互题联调前只保留 default。
   supportedJudgeModes:
     - default
 
 remoteConfig:
+  # 临时节点默认不依赖 Nacos 远程配置，避免短期节点额外配置成本。
   enabled: false
 
 hnieoj:
+  # HNieOJ 后端地址。部署脚本会用该地址在容器启动前兑换 JWT。
   baseUrl: "http://127.0.0.1:8800"
+  # 节点访问后端接口的 HTTP 超时时间。
   requestTimeout: "30s"
   formalToken:
+    # temp 节点不使用 formal 私钥，保持为空即可。
     privateKeyPath: ""
     cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
     refreshInterval: "30s"
@@ -34,37 +42,52 @@ hnieoj:
     expireTime: ""
 
 rabbitmq:
+  # RabbitMQ 连接信息。临时节点通常与正式节点消费同一后端发布的任务队列。
   host: "127.0.0.1"
   port: 5672
   username: "hnieoj_judge"
   password: "replace_me"
   virtualHost: "hnieoj"
+  # 判题任务交换机、队列和路由键，需要与后端配置一致。
   exchange: "hnieoj.judge.exchange"
   queue: "hnieoj.judge.task"
   routingKey: "judge.submission.created"
+  # 死信队列配置。超过 maxRetries 后任务进入 DLQ。
   deadLetterExchange: "hnieoj.judge.dlx"
   deadLetterQueue: "hnieoj.judge.task.dlq"
   deadLetterRoutingKey: "judge.submission.created.dlq"
+  # RabbitMQ 预取数量。通常与 node.maxConcurrency 保持一致。
   prefetch: 2
+  # 可重试错误的最大重试次数和重试退避时间。
   maxRetries: 3
   retryBackoff: "10s"
 
 testdata:
+  # 测试数据缓存目录。建议挂载持久化目录，避免重复下载大测试数据。
   cacheRoot: "/data/oj/judge-cache"
+  # 缓存容量上限，超过后清理最久未使用的测试数据。
   maxCacheBytes: 21474836480
+  # 测试数据多久未使用后可被清理。
   maxUnusedDuration: "72h"
+  # 缓存清理任务执行间隔。
   cleanupInterval: "1h"
+  # 心跳中的缓存和磁盘统计采样间隔。
   statsInterval: "5m"
 
 gojudge:
+  # go-judge sandbox 服务地址。compose 部署时通常使用容器服务名。
   endpoint: "http://go-judge-sandbox:5050"
+  # 如果 sandbox 启动时配置了 -auth-token，这里填写相同 token。
   authToken: ""
 
 reporter:
+  # 事件上报模式。生产环境使用 http，本地调试可使用 log/mock。
   mode: "http"
   endpoint: "/judge/submissions/{submissionId}/events"
 
 heartbeat:
+  # 生产环境建议开启心跳，后端依赖心跳判断临时节点是否可调度。
   enabled: true
   endpoint: "/judge/nodes/heartbeat"
+  # 建议保持 30 秒左右，不要调到 1 秒级，避免给后端造成不必要压力。
   interval: "30s"
