@@ -223,10 +223,100 @@ write_modes_yaml() {
   done
 }
 
+default_node_name() {
+  local host
+  local suffix
+  host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'node')"
+  host="${host//[^a-zA-Z0-9_.-]/-}"
+  [[ -n "${host}" ]] || host="node"
+  suffix="$(date '+%Y%m%d%H%M%S')"
+  printf 'judge-%s-%s' "${host}" "${suffix}"
+}
+
 prepare_dirs() {
   mkdir -p "${CONFIG_DIR}" "${SECURITY_DIR}" "${CACHE_DIR}"
   chmod 700 "${CONFIG_DIR}" "${SECURITY_DIR}" 2>/dev/null || true
   chmod 755 "${CACHE_DIR}" 2>/dev/null || true
+}
+
+yaml_value() {
+  local section="$1"
+  local key="$2"
+  local file="${3:-${CONFIG_FILE}}"
+  awk -v section="${section}" -v key="${key}" '
+    function trim(s) {
+      gsub(/^[ \t]+|[ \t]+$/, "", s)
+      return s
+    }
+    function unquote(s) {
+      s = trim(s)
+      if ((substr(s, 1, 1) == "\"" && substr(s, length(s), 1) == "\"") ||
+          (substr(s, 1, 1) == "'"'"'" && substr(s, length(s), 1) == "'"'"'")) {
+        s = substr(s, 2, length(s) - 2)
+      }
+      return s
+    }
+    /^[^ \t#][^:]*:[ \t]*($|#)/ {
+      line = $0
+      sub(/[ \t]*#.*/, "", line)
+      split(line, parts, ":")
+      current = trim(parts[1])
+      next
+    }
+    current == section {
+      line = $0
+      sub(/[ \t]*#.*/, "", line)
+      pattern = "^[ \t]+" key ":[ \t]*"
+      if (line ~ pattern) {
+        sub(pattern, "", line)
+        print unquote(line)
+        exit
+      }
+    }
+  ' "${file}"
+}
+
+yaml_list_value() {
+  local section="$1"
+  local key="$2"
+  local file="${3:-${CONFIG_FILE}}"
+  awk -v section="${section}" -v key="${key}" '
+    function trim(s) {
+      gsub(/^[ \t]+|[ \t]+$/, "", s)
+      return s
+    }
+    /^[^ \t#][^:]*:[ \t]*($|#)/ {
+      line = $0
+      sub(/[ \t]*#.*/, "", line)
+      split(line, parts, ":")
+      current = trim(parts[1])
+      in_list = 0
+      next
+    }
+    current == section {
+      line = $0
+      sub(/[ \t]*#.*/, "", line)
+      if (line ~ "^[ \t]+" key ":[ \t]*$") {
+        in_list = 1
+        next
+      }
+      if (in_list && line ~ "^[ \t]+-[ \t]*") {
+        sub("^[ \t]+-[ \t]*", "", line)
+        item = trim(line)
+        if (item != "") {
+          if (out != "") out = out ","
+          out = out item
+        }
+        next
+      }
+      if (in_list && line !~ "^[ \t]+") {
+        in_list = 0
+      }
+    }
+    END {
+      print out
+    }
+  ' "${file}"
 }
 
 check_source_tree() {
@@ -238,6 +328,75 @@ preflight() {
   check_default_path_permissions
   check_docker
   prepare_dirs
+}
+
+check_tcp_connectivity() {
+  local label="$1"
+  local host="$2"
+  local port="$3"
+  [[ -n "${host}" ]] || fail "${label} 主机为空，请检查配置"
+  [[ "${port}" =~ ^[0-9]+$ ]] || fail "${label} 端口无效：${port}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 bash -c ': >/dev/tcp/$1/$2' _ "${host}" "${port}" >/dev/null 2>&1 || fail "${label} 不可连接：${host}:${port}"
+  else
+    bash -c ': >/dev/tcp/$1/$2' _ "${host}" "${port}" >/dev/null 2>&1 || fail "${label} 不可连接：${host}:${port}"
+  fi
+  log "${label} 连通性正常：${host}:${port}"
+}
+
+check_backend_connectivity() {
+  local backend_url
+  backend_url="$(yaml_value hnieoj baseUrl)"
+  [[ -n "${backend_url}" ]] || fail "HnieOJ 后端地址为空，请检查 hnieoj.baseUrl"
+  require_command curl
+  curl -k -sS -o /dev/null --connect-timeout 5 --max-time 10 "${backend_url}" || fail "HnieOJ 后端不可连接：${backend_url}"
+  log "HnieOJ 后端连通性正常：${backend_url}"
+}
+
+check_rabbitmq_connectivity() {
+  local host
+  local port
+  host="$(yaml_value rabbitmq host)"
+  port="$(yaml_value rabbitmq port)"
+  check_tcp_connectivity "RabbitMQ" "${host}" "${port}"
+}
+
+check_gojudge_status() {
+  if docker_compose ps --status running go-judge-sandbox >/dev/null 2>&1; then
+    if docker_compose ps --status running go-judge-sandbox | grep -q 'go-judge-sandbox'; then
+      log "go-judge sandbox 容器正在运行"
+      return
+    fi
+  fi
+  warn "go-judge sandbox 容器尚未运行；首次部署时会在 docker compose up 后启动"
+}
+
+print_deployment_summary() {
+  local node_name
+  local node_type
+  local supported_modes
+  local backend_url
+  local rabbit_host
+  local rabbit_port
+  local heartbeat_enabled
+  local heartbeat_interval
+  node_name="$(yaml_value node name)"
+  node_type="$(yaml_value node type)"
+  supported_modes="$(yaml_list_value node supportedJudgeModes)"
+  backend_url="$(yaml_value hnieoj baseUrl)"
+  rabbit_host="$(yaml_value rabbitmq host)"
+  rabbit_port="$(yaml_value rabbitmq port)"
+  heartbeat_enabled="$(yaml_value heartbeat enabled)"
+  heartbeat_interval="$(yaml_value heartbeat interval)"
+  [[ -n "${supported_modes}" ]] || supported_modes="default"
+  log "部署摘要"
+  printf '  节点名称：%s\n' "${node_name:-未知}"
+  printf '  节点类型：%s\n' "${node_type:-未知}"
+  printf '  判题模式：%s\n' "${supported_modes}"
+  printf '  镜像地址：%s\n' "${IMAGE}"
+  printf '  后端地址：%s\n' "${backend_url:-未知}"
+  printf '  RabbitMQ：%s:%s\n' "${rabbit_host:-未知}" "${rabbit_port:-未知}"
+  printf '  心跳配置：enabled=%s interval=%s\n' "${heartbeat_enabled:-未知}" "${heartbeat_interval:-未知}"
 }
 
 parse_temp_token_response() {
@@ -511,7 +670,7 @@ init_config() {
   local formal_token_group=""
   local formal_token_data_id=""
 
-  node_name="$(prompt "节点名称" "judge-node-01")"
+  node_name="$(prompt "节点名称" "$(default_node_name)")"
   max_concurrency="$(prompt_positive_int "最大并发判题任务数" "2")"
   supported_modes="$(normalize_modes_csv "$(prompt "支持的判题模式" "default")")"
   backend_url="$(prompt "HnieOJ 后端基础地址" "http://127.0.0.1:8800")"
@@ -637,6 +796,9 @@ doctor() {
     fail "formal 节点私钥缺失：${PRIVATE_KEY_FILE}"
   fi
   docker_compose config >/dev/null
+  check_backend_connectivity
+  check_rabbitmq_connectivity
+  check_gojudge_status
   log "预检查通过"
 }
 
@@ -671,6 +833,8 @@ deploy() {
   doctor
   docker_compose up -d --force-recreate --remove-orphans
   docker_compose ps
+  check_gojudge_status
+  print_deployment_summary
   log "部署完成"
 }
 
