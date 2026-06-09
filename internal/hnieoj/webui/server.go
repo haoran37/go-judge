@@ -377,10 +377,30 @@ func (s *Server) handleSetupTemp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpClient := &http.Client{Timeout: cfg.HnieOJ.RequestTimeout}
+	if s.logs != nil {
+		s.logs.Info("temp token exchange started",
+			logging.String("baseUrl", cfg.HnieOJ.BaseURL),
+			logging.String("nodeName", cfg.Node.Name),
+			logging.String("timeout", cfg.HnieOJ.RequestTimeout.String()))
+	}
 	cred, err := auth.ExchangeTempToken(r.Context(), *cfg, httpClient)
 	if err != nil {
+		if s.logs != nil {
+			s.logs.Warn("temp token exchange failed",
+				logging.String("baseUrl", cfg.HnieOJ.BaseURL),
+				logging.String("nodeName", cfg.Node.Name),
+				logging.String("timeout", cfg.HnieOJ.RequestTimeout.String()),
+				logging.Error(err))
+		}
 		http.Error(w, "临时授权码兑换失败："+err.Error(), http.StatusBadRequest)
 		return
+	}
+	if s.logs != nil {
+		s.logs.Info("temp token exchange succeeded",
+			logging.String("baseUrl", cfg.HnieOJ.BaseURL),
+			logging.String("nodeName", cfg.Node.Name),
+			logging.String("nodeId", cred.NodeID),
+			logging.String("tokenId", cred.TokenID))
 	}
 	fillTempCredential(cfg, cred)
 	if err := s.store.SaveConfig(*cfg); err != nil {
