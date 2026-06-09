@@ -37,6 +37,6 @@ COPY --from=builder /out/go-judge /usr/local/bin/go-judge
 COPY --from=builder /out/hnieoj-judge-node /usr/local/bin/hnieoj-judge-node
 COPY mount.yaml /opt/go-judge/mount.yaml
 
-EXPOSE 5050
+EXPOSE 3723
 
-CMD ["/usr/local/bin/go-judge", "-http-addr=:5050", "-mount-conf=/opt/go-judge/mount.yaml"]
+CMD ["/usr/local/bin/hnieoj-judge-node"]

@@ -2,105 +2,76 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
+	"time"
 
-	"github.com/criyle/go-judge/internal/hnieoj/auth"
-	"github.com/criyle/go-judge/internal/hnieoj/config"
-	"github.com/criyle/go-judge/internal/hnieoj/heartbeat"
 	"github.com/criyle/go-judge/internal/hnieoj/logging"
-	"github.com/criyle/go-judge/internal/hnieoj/model"
-	"github.com/criyle/go-judge/internal/hnieoj/mq"
-	"github.com/criyle/go-judge/internal/hnieoj/processor"
-	"github.com/criyle/go-judge/internal/hnieoj/reporter"
-	"github.com/criyle/go-judge/internal/hnieoj/runner"
-	"github.com/criyle/go-judge/internal/hnieoj/testdata"
+	"github.com/criyle/go-judge/internal/hnieoj/node"
+	"github.com/criyle/go-judge/internal/hnieoj/webui"
 	"go.uber.org/zap"
 )
 
+const (
+	webAddr         = ":3723"
+	defaultStateDir = "/var/lib/hnieoj-judge-node"
+)
+
 func main() {
-	logger, err := zap.NewProduction()
+	zapLogger, err := zap.NewProduction()
 	if err != nil {
 		panic(err)
 	}
-	defer logger.Sync()
+	defer zapLogger.Sync()
+	logger := logging.NewRecorder(zapLogger, 300)
 
-	cfg, fixturePath, err := config.LoadFromArgs()
-	if err != nil {
-		logger.Fatal("config load failed", zap.Error(err))
+	stateDir := os.Getenv("HNIEOJ_STATE_DIR")
+	if stateDir == "" {
+		stateDir = defaultStateDir
 	}
+	store := webui.NewStore(stateDir)
+	if err := store.Ensure(); err != nil {
+		zapLogger.Fatal("state dir init failed", zap.Error(err))
+	}
+
+	manager := node.NewManager(logger)
+	if cfg, ok, err := store.LoadConfig(); err != nil {
+		logger.Warn("stored config load failed", logging.Error(err))
+	} else if ok {
+		manager.SetConfig(*cfg)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	httpClient := &http.Client{Timeout: cfg.HnieOJ.RequestTimeout}
-	cred, err := auth.Authenticate(ctx, *cfg, httpClient)
-	if err != nil {
-		logger.Fatal("auth failed", zap.Error(err))
-	}
-	logger.Info("auth succeeded", zap.String("nodeType", cfg.Node.Type), zap.String("nodeName", cfg.Node.Name))
-
-	appLogger := zapAdapter{logger: logger}
-	rep := buildReporter(*cfg, httpClient, cred, appLogger)
-	testdataClient := testdata.New(cfg.HnieOJ.BaseURL, cfg.Testdata.CacheRoot, httpClient, cred, appLogger)
-	testdataClient.StartCleaner(ctx, cfg.Testdata.CleanupInterval, cfg.Testdata.MaxCacheBytes, cfg.Testdata.MaxUnusedDuration)
-	runnerClient := runner.New(cfg.GoJudge.Endpoint, cfg.GoJudge.AuthToken, httpClient, appLogger)
-	proc := processor.New(testdataClient, runnerClient, rep, cred, appLogger, cfg.Node.SupportedJudgeModes)
-
-	var running atomic.Int64
-	heartbeat.New(*cfg, cred, httpClient, appLogger, &running).Start(ctx)
-	logger.Info("node started", zap.String("nodeName", cfg.Node.Name), zap.String("nodeType", cfg.Node.Type), zap.Int("maxConcurrency", cfg.Node.MaxConcurrency), zap.Strings("supportedJudgeModes", cfg.Node.SupportedJudgeModes))
-
-	handler := limitedHandler(cfg.Node.MaxConcurrency, &running, proc.Process)
-	if fixturePath != "" {
-		if err := runFixture(ctx, fixturePath, handler); err != nil {
-			logger.Fatal("fixture failed", zap.Error(err))
-		}
-		return
+	server := &http.Server{
+		Addr:              webAddr,
+		Handler:           webui.NewServer(store, manager, logger).Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	consumer := mq.New(cfg.RabbitMQ, appLogger)
-	if err := consumer.Consume(ctx, handler); err != nil && !errors.Is(err, context.Canceled) {
-		logger.Fatal("rabbitmq consumer stopped", zap.Error(err))
-	}
-}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = manager.Stop(shutdownCtx)
+		_ = server.Shutdown(shutdownCtx)
+	}()
 
-func buildReporter(cfg config.Config, httpClient *http.Client, cred *auth.Credential, logger logging.Logger) reporter.Reporter {
-	if cfg.Reporter.Mode == "log" || cfg.Reporter.Mode == "mock" {
-		return reporter.NewLog(logger)
+	if _, ok := manager.Config(); ok {
+		go func() {
+			startCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if err := manager.Start(startCtx); err != nil {
+				logger.Warn("auto start failed", logging.Error(err))
+			}
+		}()
 	}
-	return reporter.NewHTTP(cfg.HnieOJ.BaseURL, cfg.Reporter.Endpoint, httpClient, cred, logger)
-}
 
-func limitedHandler(maxConcurrency int, running *atomic.Int64, handler func(context.Context, model.Task) error) func(context.Context, model.Task) error {
-	sem := make(chan struct{}, maxConcurrency)
-	return func(ctx context.Context, task model.Task) error {
-		select {
-		case sem <- struct{}{}:
-			running.Add(1)
-			defer func() {
-				running.Add(-1)
-				<-sem
-			}()
-			return handler(ctx, task)
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	logger.Info("webui started", logging.String("addr", webAddr), logging.String("stateDir", stateDir))
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		zapLogger.Fatal("webui stopped", zap.Error(err))
 	}
-}
-
-func runFixture(ctx context.Context, path string, handler func(context.Context, model.Task) error) error {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	var task model.Task
-	if err := json.Unmarshal(b, &task); err != nil {
-		return err
-	}
-	return handler(ctx, task)
 }

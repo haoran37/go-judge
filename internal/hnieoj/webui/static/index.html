@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HnieOJ 判题机控制台</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside class="side">
+    <div class="brand">
+      <div class="mark">HJ</div>
+      <div>
+        <strong>HnieOJ Judge</strong>
+        <span>本地控制台</span>
+      </div>
+    </div>
+    <nav>
+      <button data-view="dashboard" class="active">仪表盘</button>
+      <button data-view="setup">初始化</button>
+      <button data-view="config">配置</button>
+      <button data-view="logs">日志</button>
+    </nav>
+    <button id="logout" class="ghost">退出登录</button>
+  </aside>
+
+  <main>
+    <header>
+      <div>
+        <h1>判题节点控制台</h1>
+        <p id="subtitle">加载中</p>
+      </div>
+      <div class="actions">
+        <button id="refresh">刷新</button>
+        <button id="start" class="primary">启动</button>
+        <button id="restart">重启判题服务</button>
+        <button id="stop" class="danger">停止</button>
+      </div>
+    </header>
+
+    <section id="login-view" class="panel hidden">
+      <h2>管理员登录</h2>
+      <p>首次打开需要创建管理员密码。之后所有管理操作都需要登录。</p>
+      <div class="form-row">
+        <label>管理员密码</label>
+        <input id="login-password" type="password" autocomplete="current-password">
+      </div>
+      <button id="login-submit" class="primary">继续</button>
+      <pre id="login-message"></pre>
+    </section>
+
+    <section id="dashboard" class="view">
+      <div class="grid stats">
+        <article><span>运行状态</span><strong id="stat-state">-</strong></article>
+        <article><span>节点类型</span><strong id="stat-type">-</strong></article>
+        <article><span>运行任务</span><strong id="stat-running">0</strong></article>
+        <article><span>已完成</span><strong id="stat-finished">0</strong></article>
+        <article><span>失败任务</span><strong id="stat-failed">0</strong></article>
+        <article><span>最近错误</span><strong id="stat-error">无</strong></article>
+      </div>
+    </section>
+
+    <section id="setup" class="view hidden">
+      <div class="panel">
+        <h2>初始化向导</h2>
+        <div class="segmented">
+          <button id="mode-formal" class="active">正式节点</button>
+          <button id="mode-temp">临时节点</button>
+        </div>
+        <div class="grid two">
+          <div class="form-row"><label>节点名称</label><input id="node-name" value="judge-node-01"></div>
+          <div class="form-row"><label>最大并发</label><input id="max-concurrency" type="number" value="2" min="1"></div>
+          <div class="form-row"><label>后端地址</label><input id="base-url" placeholder="http://gateway:8800"></div>
+          <div class="form-row"><label>判题模式</label><input id="judge-modes" value="default"></div>
+          <div class="form-row"><label>RabbitMQ 主机</label><input id="rabbit-host" value="rabbitmq"></div>
+          <div class="form-row"><label>RabbitMQ 端口</label><input id="rabbit-port" type="number" value="5672"></div>
+          <div class="form-row"><label>RabbitMQ 用户</label><input id="rabbit-user" value="hnieoj_judge"></div>
+          <div class="form-row"><label>RabbitMQ 密码</label><input id="rabbit-password" type="password"></div>
+          <div class="form-row"><label>RabbitMQ vhost</label><input id="rabbit-vhost" value="hnieoj"></div>
+          <div class="form-row temp-only hidden"><label>临时授权码</label><input id="temp-auth-code" type="password"></div>
+        </div>
+        <div class="form-row formal-only">
+          <label>formal 私钥 PEM</label>
+          <textarea id="formal-private-key" rows="8" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+        </div>
+        <button id="setup-submit" class="primary">保存并验证</button>
+        <pre id="setup-message"></pre>
+      </div>
+    </section>
+
+    <section id="config" class="view hidden">
+      <div class="panel">
+        <h2>在线配置</h2>
+        <p>保存配置后，点击“重启判题服务”使配置生效。敏感字段留空表示保持原值。</p>
+        <div class="grid two">
+          <div class="form-row"><label>节点名称</label><input id="cfg-node-name"></div>
+          <div class="form-row"><label>节点类型</label><select id="cfg-node-type"><option>formal</option><option>temp</option></select></div>
+          <div class="form-row"><label>最大并发</label><input id="cfg-max-concurrency" type="number" min="1"></div>
+          <div class="form-row"><label>支持模式</label><input id="cfg-judge-modes"></div>
+          <div class="form-row"><label>后端地址</label><input id="cfg-base-url"></div>
+          <div class="form-row"><label>RabbitMQ 主机</label><input id="cfg-rabbit-host"></div>
+          <div class="form-row"><label>RabbitMQ 端口</label><input id="cfg-rabbit-port" type="number"></div>
+          <div class="form-row"><label>RabbitMQ 用户</label><input id="cfg-rabbit-user"></div>
+          <div class="form-row"><label>RabbitMQ 新密码</label><input id="cfg-rabbit-password" type="password"></div>
+          <div class="form-row"><label>RabbitMQ vhost</label><input id="cfg-rabbit-vhost"></div>
+          <div class="form-row"><label>心跳间隔</label><input id="cfg-heartbeat-interval" value="30s"></div>
+        </div>
+        <button id="config-save" class="primary">保存配置</button>
+        <pre id="config-message"></pre>
+      </div>
+    </section>
+
+    <section id="logs" class="view hidden">
+      <div class="panel">
+        <h2>最近日志</h2>
+        <div id="log-list" class="logs"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

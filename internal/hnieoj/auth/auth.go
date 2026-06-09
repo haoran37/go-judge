@@ -229,6 +229,10 @@ func resolveTempCredential(ctx context.Context, cfg config.Config, client *http.
 	return exchangeTempToken(ctx, cfg, client)
 }
 
+func ExchangeTempToken(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
+	return exchangeTempToken(ctx, cfg, client)
+}
+
 func credentialFromTempTokenConfig(cfg config.TempToken) (*Credential, error) {
 	token := strings.TrimSpace(cfg.JWT)
 	if token == "" {

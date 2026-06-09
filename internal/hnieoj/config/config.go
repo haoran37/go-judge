@@ -3,7 +3,6 @@ package config
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,20 +114,6 @@ type RemoteConfig struct {
 	Nacos   NacosConfig `yaml:"nacos"`
 }
 
-func LoadFromArgs() (*Config, string, error) {
-	var configPath string
-	var fixturePath string
-	flag.StringVar(&configPath, "config", "config.example.yaml", "path to HnieOJ judge node config")
-	flag.StringVar(&fixturePath, "fixture", "", "run one local task fixture instead of consuming RabbitMQ")
-	flag.Parse()
-
-	cfg, err := Load(configPath)
-	if err != nil {
-		return nil, "", err
-	}
-	return cfg, fixturePath, nil
-}
-
 func Load(path string) (*Config, error) {
 	cfg := defaultConfig()
 	if path != "" {
@@ -215,6 +200,10 @@ func defaultConfig() *Config {
 			},
 		},
 	}
+}
+
+func Default() *Config {
+	return defaultConfig()
 }
 
 func (c *Config) Validate() error {

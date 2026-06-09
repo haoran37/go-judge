@@ -1,99 +1,88 @@
 # HnieOJ go-judge 判题机
 
-HnieOJ go-judge 是基于 [criyle/go-judge](https://github.com/criyle/go-judge) 的二次开发版本。它保留上游沙箱执行能力，并新增 HnieOJ 判题节点适配层，用于连接后端任务队列、节点认证、测试数据缓存、心跳和判题事件上报。
+HnieOJ go-judge 是基于 [criyle/go-judge](https://github.com/criyle/go-judge) 的二次开发版本，保留上游沙箱执行能力，并新增 HnieOJ 判题节点、WebUI 管理控制台、节点认证、任务消费、测试数据缓存、心跳和判题事件上报。
 
-这个仓库面向 HnieOJ 生产部署，不是上游 go-judge 的通用替代发行版。
-
-## 相关项目
+相关项目：
 
 - 源仓库：[criyle/go-judge](https://github.com/criyle/go-judge)
-- HnieOJ 后端：[HnieOJ 后端仓库](https://github.com/haoran37/HNieOJ-backend)
-- HnieOJ 前端：[HnieOJ 前端仓库](https://github.com/haoran37/HNieOJ)
+- HnieOJ 后端：[haoran37/HnieOJ-backend](https://github.com/haoran37/HnieOJ-backend)
+- HnieOJ 前端：[haoran37/HnieOJ](https://github.com/haoran37/HnieOJ)
 - API 文档：[Apifox](https://s.apifox.cn/91edc2c6-6918-4179-9852-9ec3742377c8)
 
 ## 核心能力
 
-- 沙箱执行：通过 `go-judge` 在受限环境中编译、运行和采集程序结果。
-- 判题节点：通过 `hnieoj-judge-node` 消费 RabbitMQ 判题任务，并向 HnieOJ 后端上报事件。
-- 节点认证：支持 `formal` 长期节点和 `temp` 临时节点。
-- 临时节点预认证：部署脚本会在容器启动前用授权码兑换 JWT，失败时立即要求重新输入。
-- 测试数据缓存：支持缓存容量、未使用时间、定时清理和心跳统计采样。
-- 节点心跳：上报节点在线状态、并发能力、磁盘/缓存统计和支持的判题模式。
-- 判题模式：支持 `default`、`spj`、`interactive`，生产默认只开启 `default`。
-- 语言环境：Docker 镜像内置 C、C++17、Java 17、Python 3 工具链。
+- WebUI 控制台：镜像启动后访问 `3723` 端口，在浏览器完成初始化、配置、启动、停止、重启和状态查看。
+- 正式节点：支持在 WebUI 上传 RSA 私钥，并通过后端/Nacos 获取 formal token。
+- 临时节点：支持在 WebUI 输入授权码，系统自动生成本机实例密钥并兑换 JWT。
+- 动态配置：配置保存到容器持久化目录，修改后可通过 WebUI 重启判题服务生效。
+- 判题执行：内置 `go-judge` 沙箱服务，支持 C、C++17、Java 17、Python 3。
+- 判题模式：支持 `default`、`spj`、`interactive`，启用前需确认后端和题目数据协议已闭环。
+- 运维数据：展示运行状态、运行中任务、任务统计、最近错误、最近日志和缓存/磁盘相关信息。
 
-## 镜像发布
+## Docker 部署
 
-Docker Hub 仓库：
-
-```text
-haoran37/hnieoj-go-judge
-```
-
-常用标签：
+默认镜像：
 
 ```text
 haoran37/hnieoj-go-judge:latest
-haoran37/hnieoj-go-judge:sha-<commit>
 ```
 
-项目采用简单 Git Flow：日常开发进入 `develop`，合并到 `master` 后才触发 GitHub Actions 构建并发布 Docker Hub 镜像。生产部署建议使用 `sha-<commit>` 固定标签，避免 `latest` 漂移。
-
-## Linux 部署
-
-部署脚本面向主流 Linux 发行版，已在 Ubuntu 系列环境验证；其他发行版只要求具备 Bash、Docker Engine、Docker Compose v2 插件，并能访问 Docker daemon。默认部署目录如下：
-
-```text
-/etc/hnieoj/go-judge
-/etc/hnieoj/judge-security
-/data/oj/judge-cache
-```
-
-一键部署最新镜像：
+直接启动：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/master/deploy/deploy-judge-node.sh -o /tmp/hnieoj-judge-node.sh && sudo IMAGE_TAG=latest bash /tmp/hnieoj-judge-node.sh deploy
+docker run -d \
+  --name hnieoj-judge-node \
+  --restart unless-stopped \
+  --privileged \
+  --shm-size=512m \
+  -p 3723:3723 \
+  -v hnieoj-judge-state:/var/lib/hnieoj-judge-node \
+  -v hnieoj-judge-cache:/data/oj/judge-cache \
+  haoran37/hnieoj-go-judge:latest
 ```
 
-指定固定镜像版本：
+启动后访问：
+
+```text
+http://服务器IP:3723
+```
+
+首次进入 WebUI 后创建管理员密码，然后选择正式节点或临时节点完成初始化。
+
+## 一键脚本
+
+脚本只负责拉取镜像、替换旧容器、挂载状态目录和缓存目录、映射 WebUI 端口。私钥上传、临时令牌兑换、实例密钥生成和判题配置都在 WebUI 中完成。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/master/deploy/deploy-judge-node.sh -o /tmp/hnieoj-judge-node.sh && sudo bash /tmp/hnieoj-judge-node.sh deploy
+```
+
+指定镜像 tag：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/master/deploy/deploy-judge-node.sh -o /tmp/hnieoj-judge-node.sh && sudo IMAGE_TAG=sha-xxxxxxx bash /tmp/hnieoj-judge-node.sh deploy
 ```
 
-首次执行 `deploy` 时，脚本会交互式生成配置文件、渲染 Compose 文件、拉取镜像并重建容器。临时节点会先兑换 JWT；正式节点需要提前准备私钥：
-
-```text
-/etc/hnieoj/judge-security/judge_formal_private.pem
-```
-
-常用命令：
+修改宿主机访问端口只需要改 Docker 映射：
 
 ```bash
-sudo bash /tmp/hnieoj-judge-node.sh doctor
-sudo bash /tmp/hnieoj-judge-node.sh ps
-sudo bash /tmp/hnieoj-judge-node.sh logs hnieoj-judge-node
-sudo bash /tmp/hnieoj-judge-node.sh down
+sudo WEBUI_HOST_PORT=8080 bash /tmp/hnieoj-judge-node.sh deploy
 ```
 
-## 生产注意事项
+容器内 WebUI 固定监听 `3723`，不需要给程序额外传端口参数。
 
-- 不要将 go-judge 沙箱 HTTP 端口暴露到公网。
-- 保持 `-file-timeout` 开启，避免沙箱临时文件长期堆积。
-- 心跳间隔建议保持 30 秒左右，不要调到 1 秒级。
-- SPJ 和交互题需要后端、题目数据和判题节点完整联调后再开启。
-- Docker Hub 扫描中的 Debian CVE 依赖上游安全包修复；镜像构建会执行系统包升级，但未发布修复包的漏洞仍可能显示。
+## 注意事项
+
+- 不要把 go-judge 沙箱 HTTP 端口暴露到公网；WebUI 会在容器内管理沙箱进程。
+- WebUI 可上传私钥和修改 MQ 密码，生产环境应限制访问来源，并使用强管理员密码。
+- 状态目录 `/var/lib/hnieoj-judge-node` 必须持久化，否则管理员密码、配置和临时节点实例密钥会丢失。
+- 缓存目录 `/data/oj/judge-cache` 建议持久化，避免大测试数据反复下载。
+- 心跳间隔建议保持 30 秒左右，不要调到 1 秒级别。
 
 ## 本地开发
 
 ```bash
-go test ./...
-go build -o ./tmp/go-judge ./cmd/go-judge
+go test ./internal/hnieoj/... ./cmd/hnieoj-judge-node
 go build -o ./tmp/hnieoj-judge-node ./cmd/hnieoj-judge-node
-```
-
-本地构建镜像：
-
-```bash
 docker build -f Dockerfile.hnieoj -t haoran37/hnieoj-go-judge:dev .
 ```
