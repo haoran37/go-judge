@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -29,6 +28,8 @@ import (
 	"github.com/criyle/go-judge/internal/hnieoj/config"
 	"github.com/goccy/go-yaml"
 )
+
+const tempTokenProofTypeEd25519 = "ed25519"
 
 type Credential struct {
 	mu              sync.RWMutex
@@ -387,9 +388,9 @@ func buildTempNodeBinding(cfg config.Config) (*tempNodeBinding, error) {
 	}
 	proofType := strings.TrimSpace(temp.ProofType)
 	if proofType == "" {
-		proofType = "hmac-sha256"
+		proofType = tempTokenProofTypeEd25519
 	}
-	if proofType != "hmac-sha256" {
+	if proofType != tempTokenProofTypeEd25519 {
 		return nil, fmt.Errorf("unsupported temp token proof type %q", proofType)
 	}
 	var secret []byte
@@ -406,8 +407,7 @@ func buildTempNodeBinding(cfg config.Config) (*tempNodeBinding, error) {
 	fingerprint := buildTempNodeFingerprint(instanceID, cfg.Node.Name, cfg.Node.SupportedJudgeModes, time.Now())
 	proof := tempNodeProof{Type: proofType}
 	if len(secret) > 0 {
-		proof.SecretHash = hashBytes(secret)
-		proof.PublicKey = proofPublicKey(secret)
+		proof.PublicKey = ed25519PublicKey(secret)
 	}
 	return &tempNodeBinding{
 		Fingerprint:     fingerprint,
@@ -520,9 +520,13 @@ func hashBytes(value []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func proofPublicKey(secret []byte) string {
+func ed25519PrivateKey(secret []byte) ed25519.PrivateKey {
 	seed := sha256.Sum256(secret)
-	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	return ed25519.NewKeyFromSeed(seed[:])
+}
+
+func ed25519PublicKey(secret []byte) string {
+	privateKey := ed25519PrivateKey(secret)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	return base64.StdEncoding.EncodeToString(publicKey)
 }
@@ -541,7 +545,7 @@ func bindingProofType(binding *tempNodeBinding, fallback string) string {
 	if fallback != "" {
 		return fallback
 	}
-	return "hmac-sha256"
+	return tempTokenProofTypeEd25519
 }
 
 func bindingSecret(binding *tempNodeBinding) []byte {
@@ -553,9 +557,9 @@ func bindingSecret(binding *tempNodeBinding) []byte {
 
 func signRequest(req *http.Request, secret []byte, proofType string) {
 	if proofType == "" {
-		proofType = "hmac-sha256"
+		proofType = tempTokenProofTypeEd25519
 	}
-	if proofType != "hmac-sha256" {
+	if proofType != tempTokenProofTypeEd25519 {
 		return
 	}
 	timestamp := strconv.FormatInt(time.Now().UTC().Unix(), 10)
@@ -572,13 +576,12 @@ func signRequest(req *http.Request, secret []byte, proofType string) {
 		timestamp,
 		nonce,
 	}, "\n")
-	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(payload))
 	req.Header.Set("X-Judge-Signature-Algorithm", proofType)
 	req.Header.Set("X-Judge-Timestamp", timestamp)
 	req.Header.Set("X-Judge-Nonce", nonce)
 	req.Header.Set("X-Judge-Body-Sha256", bodyHash)
-	req.Header.Set("X-Judge-Signature", base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+	signature := ed25519.Sign(ed25519PrivateKey(secret), []byte(payload))
+	req.Header.Set("X-Judge-Signature", base64.StdEncoding.EncodeToString(signature))
 }
 
 func randomNonce() string {

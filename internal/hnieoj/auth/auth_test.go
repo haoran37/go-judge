@@ -3,7 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -76,7 +76,7 @@ func TestCredentialReplace(t *testing.T) {
 		ExpireTime:      time.Now().Add(time.Hour),
 		InstanceID:      "instance-1",
 		FingerprintHash: "fingerprint",
-		ProofType:       "hmac-sha256",
+		ProofType:       "ed25519",
 		InstanceSecret:  []byte("secret"),
 	}
 
@@ -127,7 +127,7 @@ func TestCredentialApplySignsRequest(t *testing.T) {
 		TokenID:         "token-id",
 		InstanceID:      "instance-id",
 		FingerprintHash: "fingerprint-hash",
-		ProofType:       "hmac-sha256",
+		ProofType:       "ed25519",
 		InstanceSecret:  []byte("instance-secret"),
 	}
 
@@ -146,6 +146,9 @@ func TestCredentialApplySignsRequest(t *testing.T) {
 	if got := req.Header.Get("X-Judge-Body-Sha256"); got != bodyHash {
 		t.Fatalf("body hash = %q, want %q", got, bodyHash)
 	}
+	if got := req.Header.Get("X-Judge-Signature-Algorithm"); got != "ed25519" {
+		t.Fatalf("signature algorithm = %q, want ed25519", got)
+	}
 	signingString := strings.Join([]string{
 		http.MethodPost,
 		"/judge/events?submissionId=1",
@@ -153,11 +156,13 @@ func TestCredentialApplySignsRequest(t *testing.T) {
 		req.Header.Get("X-Judge-Timestamp"),
 		req.Header.Get("X-Judge-Nonce"),
 	}, "\n")
-	mac := hmac.New(sha256.New, []byte("instance-secret"))
-	_, _ = mac.Write([]byte(signingString))
-	wantSignature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	if got := req.Header.Get("X-Judge-Signature"); got != wantSignature {
-		t.Fatalf("signature = %q, want %q", got, wantSignature)
+	signature, err := base64.StdEncoding.DecodeString(req.Header.Get("X-Judge-Signature"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := ed25519PrivateKey([]byte("instance-secret")).Public().(ed25519.PublicKey)
+	if !ed25519.Verify(publicKey, []byte(signingString), signature) {
+		t.Fatalf("signature verification failed")
 	}
 	remaining, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -207,7 +212,7 @@ func TestExchangeTempTokenSendsBindingPayload(t *testing.T) {
 				AuthCode:           "auth-code",
 				InstanceID:         "instance-id",
 				InstanceSecretPath: secretPath,
-				ProofType:          "hmac-sha256",
+				ProofType:          "ed25519",
 			},
 		},
 	}, server.Client())
@@ -223,7 +228,7 @@ func TestExchangeTempTokenSendsBindingPayload(t *testing.T) {
 	if got.Fingerprint.MachineIDHash == "" {
 		t.Fatalf("missing machine id hash: %+v", got.Fingerprint)
 	}
-	if got.Proof == nil || got.Proof.Type != "hmac-sha256" || got.Proof.SecretHash == "" || got.Proof.PublicKey == "" {
+	if got.Proof == nil || got.Proof.Type != "ed25519" || got.Proof.PublicKey == "" || got.Proof.SecretHash != "" {
 		t.Fatalf("missing proof: %+v", got.Proof)
 	}
 	if cred.FingerprintHash != "backend-fingerprint" || cred.InstanceID != "instance-id" || string(cred.InstanceSecret) != "instance-secret" {

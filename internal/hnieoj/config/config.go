@@ -253,9 +253,9 @@ func (c *Config) Validate() error {
 	}
 	c.HnieOJ.TempToken.ProofType = strings.TrimSpace(c.HnieOJ.TempToken.ProofType)
 	if c.HnieOJ.TempToken.ProofType == "" {
-		c.HnieOJ.TempToken.ProofType = "hmac-sha256"
+		c.HnieOJ.TempToken.ProofType = "ed25519"
 	}
-	if c.HnieOJ.TempToken.ProofType != "hmac-sha256" {
+	if c.HnieOJ.TempToken.ProofType != "ed25519" {
 		return fmt.Errorf("unsupported hnieoj.tempToken.proofType %q", c.HnieOJ.TempToken.ProofType)
 	}
 	return nil

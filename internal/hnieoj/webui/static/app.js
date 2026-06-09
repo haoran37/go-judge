@@ -612,7 +612,7 @@ function formConfig(mode) {
           dataId: value("formal-nacos-data-id"),
         },
       },
-      tempToken: { proofType: "hmac-sha256" },
+      tempToken: { proofType: "ed25519" },
     },
     rabbitmq: {
       host: value("rabbit-host"),

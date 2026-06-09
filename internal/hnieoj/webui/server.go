@@ -325,7 +325,7 @@ func (s *Server) handleSetupFormal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Node.Type = "formal"
-	cfg.HnieOJ.TempToken = config.TempToken{ProofType: "hmac-sha256"}
+	cfg.HnieOJ.TempToken = config.TempToken{ProofType: "ed25519"}
 	if err := cfg.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -370,7 +370,7 @@ func (s *Server) handleSetupTemp(w http.ResponseWriter, r *http.Request) {
 	cfg.HnieOJ.TempToken.AuthCode = req.AuthCode
 	cfg.HnieOJ.TempToken.InstanceID = instanceID
 	cfg.HnieOJ.TempToken.InstanceSecretPath = secretPath
-	cfg.HnieOJ.TempToken.ProofType = "hmac-sha256"
+	cfg.HnieOJ.TempToken.ProofType = "ed25519"
 	cfg.HnieOJ.FormalToken.PrivateKeyPath = ""
 	if err := cfg.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
