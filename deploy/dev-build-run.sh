@@ -41,10 +41,6 @@ check_docker() {
   docker info >/dev/null 2>&1 || fail "无法连接 Docker daemon"
 }
 
-check_git_clean() {
-  git -C "${REPO_DIR}" diff --quiet || fail "工作区存在未提交的跟踪文件修改，请先提交或暂存后再拉取 ${BRANCH}"
-}
-
 update_develop() {
   require_command git
   if [[ ! -d "${REPO_DIR}/.git" ]]; then
@@ -53,11 +49,18 @@ update_develop() {
     git clone --branch "${BRANCH}" "${REPO_URL}" "${REPO_DIR}"
     return
   fi
-  check_git_clean
-  log "正在拉取 ${REMOTE}/${BRANCH}"
-  git -C "${REPO_DIR}" fetch "${REMOTE}" "${BRANCH}"
-  git -C "${REPO_DIR}" checkout "${BRANCH}"
-  git -C "${REPO_DIR}" pull --ff-only "${REMOTE}" "${BRANCH}"
+  log "正在尝试更新 ${REMOTE}/${BRANCH}；如有本地修改，将尽量自动保留"
+  if ! git -C "${REPO_DIR}" fetch "${REMOTE}" "${BRANCH}"; then
+    log "警告：fetch 失败，将继续使用当前工作区构建"
+    return
+  fi
+  if ! git -C "${REPO_DIR}" checkout "${BRANCH}"; then
+    log "警告：切换到 ${BRANCH} 失败，将继续使用当前分支构建"
+    return
+  fi
+  if ! git -C "${REPO_DIR}" pull --ff-only --autostash "${REMOTE}" "${BRANCH}"; then
+    log "警告：拉取最新 ${BRANCH} 失败，将保留本地修改并继续构建当前工作区"
+  fi
 }
 
 build_image() {

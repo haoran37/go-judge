@@ -81,6 +81,8 @@ curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/develop/deploy/de
 
 该脚本默认构建 `haoran37/hnieoj-go-judge:dev-local`，并启动 `hnieoj-judge-node-dev` 容器。开发状态目录默认在 `/tmp/hnieoj-judge-node-dev/state`，不会覆盖生产脚本默认目录。
 
+如果 `/opt/hnieoj-go-judge-dev` 中存在本地修改，例如取消注释 Dockerfile 的阿里云 Debian 源，脚本会尽量保留这些修改并继续构建当前工作区。
+
 ## 注意事项
 
 - 不要把 go-judge 沙箱 HTTP 端口暴露到公网；WebUI 会在容器内管理沙箱进程。
