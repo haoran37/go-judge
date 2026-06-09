@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -406,6 +407,7 @@ func buildTempNodeBinding(cfg config.Config) (*tempNodeBinding, error) {
 	proof := tempNodeProof{Type: proofType}
 	if len(secret) > 0 {
 		proof.SecretHash = hashBytes(secret)
+		proof.PublicKey = proofPublicKey(secret)
 	}
 	return &tempNodeBinding{
 		Fingerprint:     fingerprint,
@@ -418,11 +420,18 @@ func buildTempNodeBinding(cfg config.Config) (*tempNodeBinding, error) {
 func buildTempNodeFingerprint(instanceID, nodeName string, supportedModes []string, now time.Time) tempNodeFingerprint {
 	hostname, _ := os.Hostname()
 	macHashes, ipHashes := networkIdentityHashes()
+	machineHash := machineIDHash()
+	if machineHash == "" {
+		machineHash = hashString("hnieoj-temp-instance:" + strings.TrimSpace(instanceID))
+	}
+	if machineHash == "" {
+		machineHash = hashString("hnieoj-hostname:" + hostname)
+	}
 	return tempNodeFingerprint{
 		InstanceID:          strings.TrimSpace(instanceID),
 		NodeName:            strings.TrimSpace(nodeName),
 		HostnameHash:        hashString(hostname),
-		MachineIDHash:       machineIDHash(),
+		MachineIDHash:       machineHash,
 		MACAddressHashes:    macHashes,
 		IPAddressHashes:     ipHashes,
 		SupportedJudgeModes: append([]string(nil), supportedModes...),
@@ -509,6 +518,13 @@ func hashString(value string) string {
 func hashBytes(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
+}
+
+func proofPublicKey(secret []byte) string {
+	seed := sha256.Sum256(secret)
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	return base64.StdEncoding.EncodeToString(publicKey)
 }
 
 func bindingInstanceID(binding *tempNodeBinding) string {
@@ -613,6 +629,7 @@ type tempNodeFingerprint struct {
 type tempNodeProof struct {
 	Type       string `json:"type,omitempty"`
 	SecretHash string `json:"secretHash,omitempty"`
+	PublicKey  string `json:"publicKey,omitempty"`
 }
 
 type tempNodeBinding struct {

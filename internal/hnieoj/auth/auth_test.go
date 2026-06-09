@@ -220,7 +220,10 @@ func TestExchangeTempTokenSendsBindingPayload(t *testing.T) {
 	if got.Fingerprint == nil || got.Fingerprint.InstanceID != "instance-id" || got.Fingerprint.NodeName != "temp-node" {
 		t.Fatalf("missing fingerprint: %+v", got.Fingerprint)
 	}
-	if got.Proof == nil || got.Proof.Type != "hmac-sha256" || got.Proof.SecretHash == "" {
+	if got.Fingerprint.MachineIDHash == "" {
+		t.Fatalf("missing machine id hash: %+v", got.Fingerprint)
+	}
+	if got.Proof == nil || got.Proof.Type != "hmac-sha256" || got.Proof.SecretHash == "" || got.Proof.PublicKey == "" {
 		t.Fatalf("missing proof: %+v", got.Proof)
 	}
 	if cred.FingerprintHash != "backend-fingerprint" || cred.InstanceID != "instance-id" || string(cred.InstanceSecret) != "instance-secret" {

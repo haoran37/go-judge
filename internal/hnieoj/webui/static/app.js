@@ -377,6 +377,7 @@ function configFormHTML(mode, cfg) {
           ${field("心跳间隔", "heartbeat-interval", c.heartbeat.interval || "30s")}
         </div>
       </section>
+      ${mode === "formal" ? formalNacosHTML(c) : ""}
       <section class="panel">
         <h2>RabbitMQ</h2>
         <div class="form-grid two">
@@ -410,6 +411,21 @@ function formalKeyHTML(cfg) {
           <label for="formal-private-key">PEM 内容</label>
           <textarea id="formal-private-key" placeholder="${escapeAttr(placeholder)}"></textarea>
         </div>
+      </div>
+    </section>`;
+}
+
+function formalNacosHTML(cfg) {
+  const nacos = cfg.hnieoj.formalToken.nacos || {};
+  return `
+    <section class="panel">
+      <h2>Nacos formal token</h2>
+      <div class="form-grid two">
+        ${field("Nacos 地址", "formal-nacos-server", nacos.serverAddr || "http://127.0.0.1:8848")}
+        ${field("Namespace", "formal-nacos-namespace", nacos.namespace || "dev")}
+        ${field("Group", "formal-nacos-group", nacos.group || "HNIEOJ_SECRET_GROUP")}
+        ${field("Data ID", "formal-nacos-data-id", nacos.dataId || "hnieoj-judge-formal-token.yaml")}
+        ${field("刷新间隔", "formal-refresh-interval", cfg.hnieoj.formalToken.refreshInterval || "30s")}
       </div>
     </section>`;
 }
@@ -516,8 +532,13 @@ function formConfig(mode) {
       requestTimeout: "30s",
       formalToken: {
         cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding",
-        refreshInterval: "30s",
-        nacos: {},
+        refreshInterval: value("formal-refresh-interval") || "30s",
+        nacos: {
+          serverAddr: value("formal-nacos-server"),
+          namespace: value("formal-nacos-namespace"),
+          group: value("formal-nacos-group"),
+          dataId: value("formal-nacos-data-id"),
+        },
       },
       tempToken: { proofType: "hmac-sha256" },
     },
@@ -571,7 +592,19 @@ async function loadLogs() {
 function normalizedConfig(cfg = {}) {
   const fallback = {
     node: { name: "judge-node-01", maxConcurrency: 2, supportedJudgeModes: ["default"] },
-    hnieoj: { baseUrl: "", formalToken: {}, tempToken: {} },
+    hnieoj: {
+      baseUrl: "",
+      formalToken: {
+        refreshInterval: "30s",
+        nacos: {
+          serverAddr: "http://127.0.0.1:8848",
+          namespace: "dev",
+          group: "HNIEOJ_SECRET_GROUP",
+          dataId: "hnieoj-judge-formal-token.yaml",
+        },
+      },
+      tempToken: {},
+    },
     rabbitmq: { host: "rabbitmq", port: 5672, username: "hnieoj_judge", virtualHost: "hnieoj" },
     heartbeat: { interval: "30s" },
   };
@@ -582,7 +615,14 @@ function normalizedConfig(cfg = {}) {
     hnieoj: {
       ...fallback.hnieoj,
       ...(cfg.hnieoj || {}),
-      formalToken: { ...(cfg.hnieoj?.formalToken || {}) },
+      formalToken: {
+        ...fallback.hnieoj.formalToken,
+        ...(cfg.hnieoj?.formalToken || {}),
+        nacos: {
+          ...fallback.hnieoj.formalToken.nacos,
+          ...(cfg.hnieoj?.formalToken?.nacos || {}),
+        },
+      },
       tempToken: { ...(cfg.hnieoj?.tempToken || {}) },
     },
     rabbitmq: { ...fallback.rabbitmq, ...(cfg.rabbitmq || {}) },
