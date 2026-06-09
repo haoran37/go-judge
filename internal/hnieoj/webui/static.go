@@ -25,6 +25,18 @@ type spaHandler struct {
 	fs fs.FS
 }
 
+var spaRoutes = map[string]struct{}{
+	"/":                 {},
+	"/setup-password":   {},
+	"/login":            {},
+	"/configure":        {},
+	"/configure/formal": {},
+	"/configure/temp":   {},
+	"/dashboard":        {},
+	"/operations":       {},
+	"/logs":             {},
+}
+
 func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		http.NotFound(w, r)
@@ -36,13 +48,21 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	file, err := h.fs.Open(name)
 	if err != nil {
-		h.serveIndex(w, r)
+		if isSPARoute(r.URL.Path) {
+			h.serveIndex(w, r)
+			return
+		}
+		http.NotFound(w, r)
 		return
 	}
 	defer file.Close()
 	stat, err := file.Stat()
 	if err != nil || stat.IsDir() {
-		h.serveIndex(w, r)
+		if isSPARoute(r.URL.Path) {
+			h.serveIndex(w, r)
+			return
+		}
+		http.NotFound(w, r)
 		return
 	}
 	body, err := io.ReadAll(file)
@@ -51,6 +71,15 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeContent(w, r, name, stat.ModTime(), bytes.NewReader(body))
+}
+
+func isSPARoute(route string) bool {
+	route = path.Clean(route)
+	if route == "." {
+		route = "/"
+	}
+	_, ok := spaRoutes[route]
+	return ok
 }
 
 func (h spaHandler) serveIndex(w http.ResponseWriter, r *http.Request) {

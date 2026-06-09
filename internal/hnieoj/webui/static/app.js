@@ -1,7 +1,19 @@
 const app = document.getElementById("app");
 
+const routes = new Set([
+  "/",
+  "/setup-password",
+  "/login",
+  "/configure",
+  "/configure/formal",
+  "/configure/temp",
+  "/dashboard",
+  "/operations",
+  "/logs",
+]);
+
 let setup = null;
-let runtime = null;
+let runtime = {};
 let currentConfig = null;
 
 async function api(path, options = {}) {
@@ -18,8 +30,7 @@ async function api(path, options = {}) {
 
 function navigate(path, replace = false) {
   if (location.pathname !== path) {
-    const method = replace ? "replaceState" : "pushState";
-    history[method]({}, "", path);
+    history[replace ? "replaceState" : "pushState"]({}, "", path);
   }
   render().catch(showFatal);
 }
@@ -28,11 +39,11 @@ window.addEventListener("popstate", () => render().catch(showFatal));
 
 function showFatal(err) {
   app.innerHTML = `
-    <main class="center-shell">
-      <section class="auth-panel">
-        <img src="/hie.svg" class="auth-logo" alt="HnieOJ">
+    <main class="auth-page">
+      <section class="login-panel">
+        <img src="/hie.svg" class="logo" alt="HnieOJ">
         <h1>控制台加载失败</h1>
-        <p>${escapeHTML(err.message)}</p>
+        <p class="error">${escapeHTML(err.message)}</p>
       </section>
     </main>`;
 }
@@ -53,6 +64,11 @@ async function render() {
   await loadSetupStatus();
   const path = normalizePath(location.pathname);
 
+  if (!routes.has(path)) {
+    navigate(setup.configured ? "/dashboard" : "/configure", true);
+    return;
+  }
+
   if (!setup.adminInitialized) {
     if (path !== "/setup-password") {
       history.replaceState({}, "", "/setup-password");
@@ -71,7 +87,7 @@ async function render() {
 
   if (!setup.configured && !path.startsWith("/configure")) {
     history.replaceState({}, "", "/configure");
-    renderConfigureChoice();
+    await renderAuthed("/configure");
     return;
   }
 
@@ -83,31 +99,42 @@ async function render() {
 }
 
 function normalizePath(path) {
-  if (!path || path === "/index.html") {
-    return "/";
-  }
+  if (!path || path === "/index.html") return "/";
   return path.replace(/\/+$/, "") || "/";
 }
 
 function renderSetupPassword() {
   app.innerHTML = `
-    <main class="center-shell">
-      <section class="auth-panel">
-        <img src="/hie.svg" alt="HnieOJ" class="auth-logo">
-        <p class="eyebrow">首次初始化</p>
-        <h1>设置管理密码</h1>
-        <p>完成前不会展示节点配置、运行状态或日志页面。</p>
-        <div class="form-grid">
-          <div class="field">
-            <label for="password">管理密码</label>
-            <input id="password" type="password" autocomplete="new-password" placeholder="至少 8 位">
+    <main class="auth-page">
+      <section class="login-panel">
+        <div class="auth-head">
+          <img src="/hie.svg" class="logo" alt="HnieOJ">
+          <div>
+            <h1>首次访问：创建本地管理员密码</h1>
+            <p>这个密码只用于当前判题机 WebUI，不会写入 HnieOJ 后端。</p>
           </div>
-          <button id="submit" class="primary">创建管理密码</button>
-          <div id="message" class="message" role="status"></div>
         </div>
+        <div class="guide">
+          <h2>初始化流程</h2>
+          <ol>
+            <li>设置本地管理员密码。</li>
+            <li>登录后选择正式节点或临时节点。</li>
+            <li>填写 HnieOJ 后端、RabbitMQ 和节点参数，然后启动判题服务。</li>
+          </ol>
+        </div>
+        <form id="setup-form" class="form-grid">
+          <div class="field">
+            <label for="password">管理员密码</label>
+            <input id="password" type="password" autocomplete="new-password" placeholder="至少 8 位" autofocus>
+            <span class="hint">建议使用只在本机保存的独立密码。</span>
+          </div>
+          <button class="primary" type="submit">创建密码并继续</button>
+          <div id="message" class="message" role="status"></div>
+        </form>
       </section>
     </main>`;
-  document.getElementById("submit").onclick = async () => {
+  document.getElementById("setup-form").onsubmit = async (event) => {
+    event.preventDefault();
     await submitWithMessage("message", async () => {
       await api("/api/v1/setup/admin", {
         method: "POST",
@@ -121,23 +148,27 @@ function renderSetupPassword() {
 
 function renderLogin() {
   app.innerHTML = `
-    <main class="center-shell">
-      <section class="auth-panel">
-        <img src="/hie.svg" alt="HnieOJ" class="auth-logo">
-        <p class="eyebrow">HnieOJ Judge WebUI</p>
-        <h1>登录控制台</h1>
-        <p>登录有效期为 2 小时。</p>
-        <div class="form-grid">
-          <div class="field">
-            <label for="password">管理密码</label>
-            <input id="password" type="password" autocomplete="current-password">
+    <main class="auth-page">
+      <section class="login-panel compact">
+        <div class="auth-head">
+          <img src="/hie.svg" class="logo" alt="HnieOJ">
+          <div>
+            <h1>登录 HnieOJ 判题机控制台</h1>
+            <p>登录有效期：2 小时。</p>
           </div>
-          <button id="submit" class="primary">登录</button>
-          <div id="message" class="message" role="status"></div>
         </div>
+        <form id="login-form" class="form-grid">
+          <div class="field">
+            <label for="password">管理员密码</label>
+            <input id="password" type="password" autocomplete="current-password" autofocus>
+          </div>
+          <button class="primary" type="submit">登录</button>
+          <div id="message" class="message" role="status"></div>
+        </form>
       </section>
     </main>`;
-  document.getElementById("submit").onclick = async () => {
+  document.getElementById("login-form").onsubmit = async (event) => {
+    event.preventDefault();
     await submitWithMessage("message", async () => {
       await api("/api/v1/auth/login", {
         method: "POST",
@@ -152,64 +183,57 @@ function renderLogin() {
 async function renderAuthed(path) {
   switch (path) {
     case "/configure":
-      renderShell("configure", "配置判题节点", "选择节点身份后填写连接信息。", configureChoiceHTML());
+      renderShell("configure", "配置", configureChoiceHTML());
       bindConfigureChoice();
       break;
     case "/configure/formal":
-      renderShell("configure", "配置正式节点", "上传正式节点私钥，并填写 HnieOJ 后端和 RabbitMQ 信息。", configFormHTML("formal", await loadConfig()));
+      renderShell("configure", "正式节点配置", configFormHTML("formal", await loadConfig()));
       bindConfigForm("formal");
       break;
     case "/configure/temp":
-      renderShell("configure", "配置临时节点", "输入临时授权码，控制台会实时兑换 JWT。", configFormHTML("temp", await loadConfig()));
+      renderShell("configure", "临时节点配置", configFormHTML("temp", await loadConfig()));
       bindConfigForm("temp");
       break;
     case "/operations":
-      renderShell("operations", "操作中心", "控制容器内判题服务的启动、停止和重启。", operationsHTML());
+      renderShell("operations", "操作", operationsHTML());
       bindOperations();
       break;
     case "/logs":
-      renderShell("logs", "运行日志", "查看控制台记录的最近运行日志。", logsHTML());
+      renderShell("logs", "日志", logsHTML());
       await loadLogs();
       break;
     case "/dashboard":
     default:
-      renderShell("dashboard", "仪表盘", "查看节点状态、任务统计和最近错误。", dashboardHTML());
+      renderShell("dashboard", "概览", dashboardHTML());
       break;
   }
 }
 
-function renderShell(active, title, subtitle, content) {
+function renderShell(active, title, content) {
   app.innerHTML = `
-    <div class="app-shell">
-      <aside class="sidebar">
+    <div class="console">
+      <header class="topbar">
         <div class="brand">
           <img src="/hie.svg" alt="HnieOJ">
           <div>
             <strong>HnieOJ Judge</strong>
-            <span>判题机控制台</span>
+            <span>本地管理控制台</span>
           </div>
         </div>
-        <nav class="nav" aria-label="主导航">
-          ${navLink("/configure", "配置", active === "configure")}
-          ${navLink("/dashboard", "仪表盘", active === "dashboard")}
-          ${navLink("/operations", "操作", active === "operations")}
-          ${navLink("/logs", "日志", active === "logs")}
-        </nav>
-        <div class="sidebar-footer">
-          <span class="badge ${stateClass(runtime.state)}">${stateText(runtime.state)}</span>
-          <button id="logout" class="ghost">退出登录</button>
+        <div class="top-actions">
+          <span class="status ${stateClass(runtime.state)}">状态：${stateText(runtime.state)}</span>
+          <button id="refresh">刷新</button>
+          <button id="logout">退出</button>
         </div>
-      </aside>
+      </header>
+      <nav class="tabs" aria-label="主导航">
+        ${tab("/dashboard", "概览", active === "dashboard")}
+        ${tab("/configure", "配置", active === "configure")}
+        ${tab("/operations", "操作", active === "operations")}
+        ${tab("/logs", "日志", active === "logs")}
+      </nav>
       <main class="content">
-        <header class="page-header">
-          <div>
-            <h1>${escapeHTML(title)}</h1>
-            <p class="page-subtitle">${escapeHTML(subtitle)}</p>
-          </div>
-          <div class="actions">
-            <button id="refresh">刷新</button>
-          </div>
-        </header>
+        <h1>${escapeHTML(title)}</h1>
         ${content}
       </main>
     </div>`;
@@ -231,23 +255,28 @@ function renderShell(active, title, subtitle, content) {
   };
 }
 
-function navLink(path, label, active) {
+function tab(path, label, active) {
   return `<a href="${path}" data-link class="${active ? "active" : ""}">${label}</a>`;
 }
 
 function configureChoiceHTML() {
   return `
-    <section class="grid two">
-      <button id="choose-formal" class="choice">
-        <span class="choice-index">01</span>
-        <strong>正式节点</strong>
-        <span>用于长期运行的生产判题节点，适合固定服务器和稳定网络环境。</span>
-      </button>
-      <button id="choose-temp" class="choice">
-        <span class="choice-index">02</span>
-        <strong>临时节点</strong>
-        <span>用于短期扩容或临时接入，通过授权码完成首次认证。</span>
-      </button>
+    <section class="panel">
+      <h2>节点身份</h2>
+      <table class="info-table">
+        <tbody>
+          <tr>
+            <th>正式节点</th>
+            <td>长期运行，使用正式节点私钥完成认证。</td>
+            <td><button id="choose-formal" class="primary">配置正式节点</button></td>
+          </tr>
+          <tr>
+            <th>临时节点</th>
+            <td>临时扩容，使用后端发放的授权码兑换 JWT。</td>
+            <td><button id="choose-temp">配置临时节点</button></td>
+          </tr>
+        </tbody>
+      </table>
     </section>`;
 }
 
@@ -259,50 +288,60 @@ function bindConfigureChoice() {
 function dashboardHTML() {
   const metrics = runtime.metrics || {};
   return `
-    <section class="grid three">
-      ${statHTML("运行状态", stateText(runtime.state), stateClass(runtime.state))}
-      ${statHTML("节点名称", runtime.nodeName || "未配置")}
-      ${statHTML("节点类型", nodeTypeText(runtime.nodeType))}
-      ${statHTML("运行任务", runtime.runningTasks || 0)}
-      ${statHTML("已完成任务", metrics.finishedTasks || 0)}
-      ${statHTML("失败任务", metrics.failedTasks || 0, metrics.failedTasks ? "danger-text" : "")}
+    <section class="panel">
+      <h2>节点状态</h2>
+      <table class="info-table">
+        <tbody>
+          ${row("运行状态", stateText(runtime.state))}
+          ${row("节点名称", runtime.nodeName || "未配置")}
+          ${row("节点类型", nodeTypeText(runtime.nodeType))}
+          ${row("运行任务", runtime.runningTasks || 0)}
+          ${row("启动时间", formatTime(runtime.startedAt))}
+          ${row("停止时间", formatTime(runtime.stoppedAt))}
+          ${row("最近错误", runtime.lastError || "无", runtime.lastError ? "error" : "ok")}
+        </tbody>
+      </table>
     </section>
-    <section class="panel compact-panel">
-      <div>
-        <h2 class="section-title">最近错误</h2>
-        <p class="${runtime.lastError ? "error" : "ok"}">${escapeHTML(runtime.lastError || "暂无错误")}</p>
-      </div>
+    <section class="panel">
+      <h2>任务统计</h2>
+      <table class="info-table metrics">
+        <tbody>
+          ${row("已开始", metrics.startedTasks || 0)}
+          ${row("已完成", metrics.finishedTasks || 0)}
+          ${row("失败", metrics.failedTasks || 0, metrics.failedTasks ? "error" : "")}
+          ${row("可重试错误", metrics.retryableTasks || 0)}
+        </tbody>
+      </table>
     </section>`;
 }
 
 function operationsHTML() {
   return `
-    <section class="split">
-      <div class="panel">
-        <h2 class="section-title">判题服务</h2>
-        <div class="actions">
-          <button id="start" class="primary">启动</button>
-          <button id="restart">重启</button>
-          <button id="stop" class="danger">停止</button>
-        </div>
-        <div id="operation-message" class="message" role="status"></div>
+    <section class="panel">
+      <h2>判题服务</h2>
+      <div class="button-row">
+        <button id="start" class="primary">启动</button>
+        <button id="restart">重启</button>
+        <button id="stop" class="danger">停止</button>
       </div>
-      <div class="panel status-list">
-        <h2 class="section-title">当前状态</h2>
-        ${kvHTML("状态", stateText(runtime.state))}
-        ${kvHTML("运行任务", runtime.runningTasks || 0)}
-        ${kvHTML("最近错误", runtime.lastError || "无")}
-      </div>
+      <div id="operation-message" class="message" role="status"></div>
+    </section>
+    <section class="panel">
+      <h2>当前状态</h2>
+      <table class="info-table">
+        <tbody>
+          ${row("状态", stateText(runtime.state))}
+          ${row("运行任务", runtime.runningTasks || 0)}
+          ${row("最近错误", runtime.lastError || "无", runtime.lastError ? "error" : "ok")}
+        </tbody>
+      </table>
     </section>`;
 }
 
 function bindOperations() {
-  const start = document.getElementById("start");
-  const stop = document.getElementById("stop");
-  const restart = document.getElementById("restart");
-  if (start) start.onclick = () => runtimeAction("/api/v1/runtime/start");
-  if (stop) stop.onclick = () => runtimeAction("/api/v1/runtime/stop");
-  if (restart) restart.onclick = () => runtimeAction("/api/v1/runtime/restart");
+  document.getElementById("start").onclick = () => runtimeAction("/api/v1/runtime/start");
+  document.getElementById("stop").onclick = () => runtimeAction("/api/v1/runtime/stop");
+  document.getElementById("restart").onclick = () => runtimeAction("/api/v1/runtime/restart");
 }
 
 async function runtimeAction(path) {
@@ -315,49 +354,63 @@ async function runtimeAction(path) {
 function configFormHTML(mode, cfg) {
   const c = normalizedConfig(cfg);
   return `
-    <section class="panel">
-      <div class="form-grid two">
-        ${field("节点名称", "node-name", c.node.name)}
-        ${field("最大并发", "max-concurrency", c.node.maxConcurrency, "number")}
-        ${field("HnieOJ 后端地址", "base-url", c.hnieoj.baseUrl, "text", "http://gateway:8800")}
-        ${field("判题模式", "judge-modes", c.node.supportedJudgeModes.join(","))}
-        ${field("RabbitMQ 主机", "rabbit-host", c.rabbitmq.host)}
-        ${field("RabbitMQ 端口", "rabbit-port", c.rabbitmq.port, "number")}
-        ${field("RabbitMQ 用户", "rabbit-user", c.rabbitmq.username)}
-        ${field("RabbitMQ 密码", "rabbit-password", "", "password", c.rabbitmq.passwordConfigured ? "留空保持原密码" : "")}
-        ${field("RabbitMQ vhost", "rabbit-vhost", c.rabbitmq.virtualHost)}
-        ${field("心跳间隔", "heartbeat-interval", c.heartbeat.interval || "30s")}
-      </div>
+    <form id="config-form">
+      <section class="panel">
+        <h2>基本信息</h2>
+        <div class="form-grid two">
+          ${field("节点名称", "node-name", c.node.name)}
+          ${field("最大并发", "max-concurrency", c.node.maxConcurrency, "number")}
+          ${field("HnieOJ 后端地址", "base-url", c.hnieoj.baseUrl, "text", "http://gateway:8800")}
+          ${field("判题模式", "judge-modes", c.node.supportedJudgeModes.join(","))}
+          ${field("心跳间隔", "heartbeat-interval", c.heartbeat.interval || "30s")}
+        </div>
+      </section>
+      <section class="panel">
+        <h2>RabbitMQ</h2>
+        <div class="form-grid two">
+          ${field("主机", "rabbit-host", c.rabbitmq.host)}
+          ${field("端口", "rabbit-port", c.rabbitmq.port, "number")}
+          ${field("用户", "rabbit-user", c.rabbitmq.username)}
+          ${field("密码", "rabbit-password", "", "password", c.rabbitmq.passwordConfigured ? "留空保持原密码" : "")}
+          ${field("vhost", "rabbit-vhost", c.rabbitmq.virtualHost)}
+        </div>
+      </section>
       ${mode === "formal" ? formalKeyHTML(c) : tempAuthHTML()}
-      <div class="actions submit-row">
-        <button id="submit-config" class="primary">${mode === "formal" ? "保存正式节点配置" : "兑换并保存临时节点配置"}</button>
-        <button id="back-config">返回配置入口</button>
-      </div>
-      <div id="config-message" class="message" role="status"></div>
-    </section>`;
+      <section class="form-footer">
+        <button class="primary" type="submit">${mode === "formal" ? "保存正式节点配置" : "兑换并保存临时节点配置"}</button>
+        <button id="back-config" type="button">返回</button>
+        <div id="config-message" class="message" role="status"></div>
+      </section>
+    </form>`;
 }
 
 function formalKeyHTML(cfg) {
   const placeholder = cfg.hnieoj.formalToken.privateKeyConfigured ? "已配置；留空保持原私钥" : "-----BEGIN PRIVATE KEY-----";
   return `
-    <div class="key-area">
-      <div class="field">
-        <label for="formal-private-key-file">上传 formal 私钥 PEM</label>
-        <input id="formal-private-key-file" type="file" accept=".pem,.key,text/plain">
+    <section class="panel">
+      <h2>正式节点私钥</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label for="formal-private-key-file">上传 PEM 文件</label>
+          <input id="formal-private-key-file" type="file" accept=".pem,.key,text/plain">
+        </div>
+        <div class="field">
+          <label for="formal-private-key">PEM 内容</label>
+          <textarea id="formal-private-key" placeholder="${escapeAttr(placeholder)}"></textarea>
+        </div>
       </div>
-      <div class="field">
-        <label for="formal-private-key">或粘贴 PEM 内容</label>
-        <textarea id="formal-private-key" placeholder="${escapeAttr(placeholder)}"></textarea>
-      </div>
-    </div>`;
+    </section>`;
 }
 
 function tempAuthHTML() {
   return `
-    <div class="field key-area">
-      <label for="temp-auth-code">临时授权码</label>
-      <input id="temp-auth-code" type="password" placeholder="输入后会实时兑换 JWT">
-    </div>`;
+    <section class="panel">
+      <h2>临时授权</h2>
+      <div class="field">
+        <label for="temp-auth-code">临时授权码</label>
+        <input id="temp-auth-code" type="password" placeholder="输入后会立即兑换 JWT">
+      </div>
+    </section>`;
 }
 
 function bindConfigForm(mode) {
@@ -371,7 +424,8 @@ function bindConfigForm(mode) {
       }
     };
   }
-  document.getElementById("submit-config").onclick = async () => {
+  document.getElementById("config-form").onsubmit = async (event) => {
+    event.preventDefault();
     await submitWithMessage("config-message", async () => {
       const cfg = formConfig(mode);
       if (mode === "formal") {
@@ -441,7 +495,7 @@ function formConfig(mode) {
 }
 
 function logsHTML() {
-  return `<section class="panel"><div id="logs" class="logs">正在加载日志</div></section>`;
+  return `<section class="panel"><h2>最近日志</h2><div id="logs" class="logs">正在加载日志</div></section>`;
 }
 
 async function loadLogs() {
@@ -479,16 +533,8 @@ function normalizedConfig(cfg = {}) {
   };
 }
 
-function statHTML(label, statValue, className = "") {
-  return `
-    <article class="stat ${className}">
-      <span>${escapeHTML(label)}</span>
-      <strong>${escapeHTML(String(statValue))}</strong>
-    </article>`;
-}
-
-function kvHTML(label, statValue) {
-  return `<p><span>${escapeHTML(label)}</span><strong>${escapeHTML(String(statValue))}</strong></p>`;
+function row(label, rowValue, className = "") {
+  return `<tr><th>${escapeHTML(label)}</th><td class="${className}">${escapeHTML(String(rowValue))}</td></tr>`;
 }
 
 function field(label, id, fieldValue = "", type = "text", placeholder = "") {
@@ -552,6 +598,7 @@ function levelClass(level = "") {
 }
 
 function formatTime(input) {
+  if (!input) return "-";
   const date = new Date(input);
   if (Number.isNaN(date.getTime())) return "-";
   return date.toLocaleString();

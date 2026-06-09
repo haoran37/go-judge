@@ -114,6 +114,15 @@ func TestStaticHandlerFallsBackForSPARoutesOnly(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("api missing status = %d, want 404", resp.StatusCode)
 	}
+
+	resp, err = http.Get(server.URL + "/missing-page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing page status = %d, want 404", resp.StatusCode)
+	}
 }
 
 func TestSetupFormalPreservesStoredSecretsWhenFieldsAreBlank(t *testing.T) {
