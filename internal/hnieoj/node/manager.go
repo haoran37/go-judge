@@ -73,10 +73,13 @@ type Manager struct {
 	metrics       Metrics
 	metricBuckets map[int64]*MetricBucket
 	sandbox       *exec.Cmd
+	startSandbox  func(context.Context) error
 }
 
 func NewManager(logger logging.Logger) *Manager {
-	return &Manager{logger: logger, state: StateStopped, metricBuckets: map[int64]*MetricBucket{}}
+	manager := &Manager{logger: logger, state: StateStopped, metricBuckets: map[int64]*MetricBucket{}}
+	manager.startSandbox = manager.startSandboxProcess
+	return manager
 }
 
 func (m *Manager) SetConfig(cfg config.Config) {
@@ -111,7 +114,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	cfg := *m.cfg
 	m.state = StateStarting
 	m.lastErr = ""
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	m.cancel = cancel
 	m.done = done
@@ -313,7 +316,7 @@ func (m *Manager) fail(err error) {
 	m.logger.Warn("judge runtime failed", logging.Error(err))
 }
 
-func (m *Manager) startSandbox(ctx context.Context) error {
+func (m *Manager) startSandboxProcess(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "/usr/local/bin/go-judge",
 		"-http-addr=127.0.0.1:5050",
 		"-mount-conf=/opt/go-judge/mount.yaml",
