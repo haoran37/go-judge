@@ -57,12 +57,16 @@ type NacosConfig struct {
 }
 
 type TempToken struct {
-	AuthCode   string `yaml:"authCode"`
-	JWT        string `yaml:"jwt"`
-	TokenType  string `yaml:"tokenType"`
-	NodeID     string `yaml:"nodeId"`
-	TokenID    string `yaml:"tokenId"`
-	ExpireTime string `yaml:"expireTime"`
+	AuthCode           string `yaml:"authCode"`
+	JWT                string `yaml:"jwt"`
+	TokenType          string `yaml:"tokenType"`
+	NodeID             string `yaml:"nodeId"`
+	TokenID            string `yaml:"tokenId"`
+	ExpireTime         string `yaml:"expireTime"`
+	InstanceID         string `yaml:"instanceId"`
+	InstanceSecretPath string `yaml:"instanceSecretPath"`
+	FingerprintHash    string `yaml:"fingerprintHash"`
+	ProofType          string `yaml:"proofType"`
 }
 
 type RabbitMQConfig struct {
@@ -258,6 +262,13 @@ func (c *Config) Validate() error {
 	if c.RabbitMQ.RetryBackoff <= 0 {
 		c.RabbitMQ.RetryBackoff = 10 * time.Second
 	}
+	c.HnieOJ.TempToken.ProofType = strings.TrimSpace(c.HnieOJ.TempToken.ProofType)
+	if c.HnieOJ.TempToken.ProofType == "" {
+		c.HnieOJ.TempToken.ProofType = "hmac-sha256"
+	}
+	if c.HnieOJ.TempToken.ProofType != "hmac-sha256" {
+		return fmt.Errorf("unsupported hnieoj.tempToken.proofType %q", c.HnieOJ.TempToken.ProofType)
+	}
 	return nil
 }
 
@@ -281,6 +292,10 @@ func applyEnv(c *Config) {
 	setString(&c.HnieOJ.TempToken.NodeID, "HNIEOJ_TEMP_NODE_ID")
 	setString(&c.HnieOJ.TempToken.TokenID, "HNIEOJ_TEMP_TOKEN_ID")
 	setString(&c.HnieOJ.TempToken.ExpireTime, "HNIEOJ_TEMP_EXPIRE_TIME")
+	setString(&c.HnieOJ.TempToken.InstanceID, "HNIEOJ_TEMP_INSTANCE_ID")
+	setString(&c.HnieOJ.TempToken.InstanceSecretPath, "HNIEOJ_TEMP_INSTANCE_SECRET_PATH")
+	setString(&c.HnieOJ.TempToken.FingerprintHash, "HNIEOJ_TEMP_FINGERPRINT_HASH")
+	setString(&c.HnieOJ.TempToken.ProofType, "HNIEOJ_TEMP_PROOF_TYPE")
 	setString(&c.RabbitMQ.Host, "HNIEOJ_RABBITMQ_HOST")
 	setInt(&c.RabbitMQ.Port, "HNIEOJ_RABBITMQ_PORT")
 	setString(&c.RabbitMQ.Username, "HNIEOJ_RABBITMQ_USERNAME")

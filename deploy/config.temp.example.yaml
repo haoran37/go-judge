@@ -40,6 +40,14 @@ hnieoj:
     nodeId: ""
     tokenId: ""
     expireTime: ""
+    # 临时节点实例 ID。部署脚本会写入持久化值，重装或删除安全目录后会变化。
+    instanceId: ""
+    # 临时节点实例密钥路径。后续请求会用它生成 HMAC 签名，请勿泄露。
+    instanceSecretPath: "/etc/hnieoj/judge-security/temp_node_instance_secret"
+    # 后端返回或本机计算的指纹摘要，用于后端绑定 JWT 与节点实例。
+    fingerprintHash: ""
+    # 当前仅支持 hmac-sha256。
+    proofType: "hmac-sha256"
 
 rabbitmq:
   # RabbitMQ 连接信息。临时节点通常与正式节点消费同一后端发布的任务队列。

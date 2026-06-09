@@ -48,6 +48,10 @@ hnieoj:
     nodeId: ""
     tokenId: ""
     expireTime: ""
+    instanceId: ""
+    instanceSecretPath: ""
+    fingerprintHash: ""
+    proofType: "hmac-sha256"
 
 rabbitmq:
   # RabbitMQ 连接信息。不要把生产密码提交到仓库。

@@ -3,19 +3,24 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,19 +30,46 @@ import (
 )
 
 type Credential struct {
-	mu          sync.RWMutex
-	HeaderName  string
-	HeaderValue string
-	NodeID      string
-	TokenID     string
-	ExpireTime  time.Time
+	mu              sync.RWMutex
+	HeaderName      string
+	HeaderValue     string
+	NodeID          string
+	TokenID         string
+	ExpireTime      time.Time
+	InstanceID      string
+	FingerprintHash string
+	ProofType       string
+	InstanceSecret  []byte
 }
 
 func (c *Credential) Apply(req *http.Request) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.HeaderName != "" && c.HeaderValue != "" {
-		req.Header.Set(c.HeaderName, c.HeaderValue)
+	headerName := c.HeaderName
+	headerValue := c.HeaderValue
+	nodeID := c.NodeID
+	tokenID := c.TokenID
+	instanceID := c.InstanceID
+	fingerprintHash := c.FingerprintHash
+	proofType := c.ProofType
+	instanceSecret := append([]byte(nil), c.InstanceSecret...)
+	c.mu.RUnlock()
+	if headerName != "" && headerValue != "" {
+		req.Header.Set(headerName, headerValue)
+	}
+	if nodeID != "" {
+		req.Header.Set("X-Judge-Node-Id", nodeID)
+	}
+	if tokenID != "" {
+		req.Header.Set("X-Judge-Token-Id", tokenID)
+	}
+	if instanceID != "" {
+		req.Header.Set("X-Judge-Instance-Id", instanceID)
+	}
+	if fingerprintHash != "" {
+		req.Header.Set("X-Judge-Fingerprint", fingerprintHash)
+	}
+	if len(instanceSecret) > 0 {
+		signRequest(req, instanceSecret, proofType)
 	}
 }
 
@@ -68,6 +100,10 @@ func (c *Credential) Replace(next *Credential) {
 	nodeID := next.NodeID
 	tokenID := next.TokenID
 	expireTime := next.ExpireTime
+	instanceID := next.InstanceID
+	fingerprintHash := next.FingerprintHash
+	proofType := next.ProofType
+	instanceSecret := append([]byte(nil), next.InstanceSecret...)
 	next.mu.RUnlock()
 
 	c.mu.Lock()
@@ -77,6 +113,10 @@ func (c *Credential) Replace(next *Credential) {
 	c.NodeID = nodeID
 	c.TokenID = tokenID
 	c.ExpireTime = expireTime
+	c.InstanceID = instanceID
+	c.FingerprintHash = fingerprintHash
+	c.ProofType = proofType
+	c.InstanceSecret = instanceSecret
 }
 
 func Authenticate(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
@@ -202,12 +242,24 @@ func credentialFromTempTokenConfig(cfg config.TempToken) (*Credential, error) {
 	if err != nil {
 		return nil, err
 	}
+	binding, err := buildTempNodeBinding(config.Config{HnieOJ: config.HnieOJConfig{TempToken: cfg}})
+	if err != nil {
+		return nil, err
+	}
+	fingerprintHash := strings.TrimSpace(cfg.FingerprintHash)
+	if fingerprintHash == "" && binding != nil {
+		fingerprintHash = binding.FingerprintHash
+	}
 	return &Credential{
-		HeaderName:  "Authorization",
-		HeaderValue: tokenType + " " + token,
-		NodeID:      strings.TrimSpace(cfg.NodeID),
-		TokenID:     strings.TrimSpace(cfg.TokenID),
-		ExpireTime:  expireTime,
+		HeaderName:      "Authorization",
+		HeaderValue:     tokenType + " " + token,
+		NodeID:          strings.TrimSpace(cfg.NodeID),
+		TokenID:         strings.TrimSpace(cfg.TokenID),
+		ExpireTime:      expireTime,
+		InstanceID:      bindingInstanceID(binding),
+		FingerprintHash: fingerprintHash,
+		ProofType:       bindingProofType(binding, cfg.ProofType),
+		InstanceSecret:  bindingSecret(binding),
 	}, nil
 }
 
@@ -321,20 +373,268 @@ func fetchEncryptedTokenFromNacos(ctx context.Context, cfg config.FormalToken, c
 	return encryptedToken, nil
 }
 
+func buildTempNodeBinding(cfg config.Config) (*tempNodeBinding, error) {
+	temp := cfg.HnieOJ.TempToken
+	instanceID := strings.TrimSpace(temp.InstanceID)
+	secretPath := strings.TrimSpace(temp.InstanceSecretPath)
+	if instanceID == "" && secretPath == "" {
+		return nil, nil
+	}
+	proofType := strings.TrimSpace(temp.ProofType)
+	if proofType == "" {
+		proofType = "hmac-sha256"
+	}
+	if proofType != "hmac-sha256" {
+		return nil, fmt.Errorf("unsupported temp token proof type %q", proofType)
+	}
+	var secret []byte
+	if secretPath != "" {
+		b, err := os.ReadFile(secretPath)
+		if err != nil {
+			return nil, err
+		}
+		secret = []byte(strings.TrimSpace(string(b)))
+		if len(secret) == 0 {
+			return nil, fmt.Errorf("temp instance secret file %q is empty", secretPath)
+		}
+	}
+	fingerprint := buildTempNodeFingerprint(instanceID, cfg.Node.Name, cfg.Node.SupportedJudgeModes, time.Now())
+	proof := tempNodeProof{Type: proofType}
+	if len(secret) > 0 {
+		proof.SecretHash = hashBytes(secret)
+	}
+	return &tempNodeBinding{
+		Fingerprint:     fingerprint,
+		Proof:           proof,
+		FingerprintHash: hashFingerprint(fingerprint),
+		InstanceSecret:  secret,
+	}, nil
+}
+
+func buildTempNodeFingerprint(instanceID, nodeName string, supportedModes []string, now time.Time) tempNodeFingerprint {
+	hostname, _ := os.Hostname()
+	macHashes, ipHashes := networkIdentityHashes()
+	return tempNodeFingerprint{
+		InstanceID:          strings.TrimSpace(instanceID),
+		NodeName:            strings.TrimSpace(nodeName),
+		HostnameHash:        hashString(hostname),
+		MachineIDHash:       machineIDHash(),
+		MACAddressHashes:    macHashes,
+		IPAddressHashes:     ipHashes,
+		SupportedJudgeModes: append([]string(nil), supportedModes...),
+		ClientTime:          now.UTC().Format(time.RFC3339),
+	}
+}
+
+func hashFingerprint(fingerprint tempNodeFingerprint) string {
+	stable := fingerprint
+	stable.ClientTime = ""
+	body, err := json.Marshal(stable)
+	if err != nil {
+		return ""
+	}
+	return hashBytes(body)
+}
+
+func machineIDHash() string {
+	for _, path := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			if value := strings.TrimSpace(string(b)); value != "" {
+				return hashString(value)
+			}
+		}
+	}
+	return ""
+}
+
+func networkIdentityHashes() ([]string, []string) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, nil
+	}
+	macSet := make(map[string]struct{})
+	ipSet := make(map[string]struct{})
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		if len(iface.HardwareAddr) > 0 {
+			macSet[hashString(iface.HardwareAddr.String())] = struct{}{}
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ipSet[hashString(ip.String())] = struct{}{}
+		}
+	}
+	return sortedKeys(macSet), sortedKeys(ipSet)
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for value := range set {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func hashString(value string) string {
+	if value == "" {
+		return ""
+	}
+	return hashBytes([]byte(value))
+}
+
+func hashBytes(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
+}
+
+func bindingInstanceID(binding *tempNodeBinding) string {
+	if binding == nil {
+		return ""
+	}
+	return binding.Fingerprint.InstanceID
+}
+
+func bindingProofType(binding *tempNodeBinding, fallback string) string {
+	if binding != nil && binding.Proof.Type != "" {
+		return binding.Proof.Type
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return "hmac-sha256"
+}
+
+func bindingSecret(binding *tempNodeBinding) []byte {
+	if binding == nil || len(binding.InstanceSecret) == 0 {
+		return nil
+	}
+	return append([]byte(nil), binding.InstanceSecret...)
+}
+
+func signRequest(req *http.Request, secret []byte, proofType string) {
+	if proofType == "" {
+		proofType = "hmac-sha256"
+	}
+	if proofType != "hmac-sha256" {
+		return
+	}
+	timestamp := strconv.FormatInt(time.Now().UTC().Unix(), 10)
+	nonce := randomNonce()
+	bodyHash := requestBodyHash(req)
+	target := req.URL.RequestURI()
+	if target == "" {
+		target = "/"
+	}
+	payload := strings.Join([]string{
+		req.Method,
+		target,
+		bodyHash,
+		timestamp,
+		nonce,
+	}, "\n")
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(payload))
+	req.Header.Set("X-Judge-Signature-Algorithm", proofType)
+	req.Header.Set("X-Judge-Timestamp", timestamp)
+	req.Header.Set("X-Judge-Nonce", nonce)
+	req.Header.Set("X-Judge-Body-Sha256", bodyHash)
+	req.Header.Set("X-Judge-Signature", base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+}
+
+func randomNonce() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func requestBodyHash(req *http.Request) string {
+	if req.Body == nil || req.Body == http.NoBody {
+		return hashBytes([]byte{})
+	}
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err == nil {
+			defer body.Close()
+			b, err := io.ReadAll(body)
+			if err == nil {
+				return hashBytes(b)
+			}
+		}
+	}
+	b, err := io.ReadAll(req.Body)
+	if err != nil {
+		req.Body = io.NopCloser(bytes.NewReader(nil))
+		return hashBytes([]byte{})
+	}
+	req.Body = io.NopCloser(bytes.NewReader(b))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(b)), nil
+	}
+	return hashBytes(b)
+}
+
+type tempNodeFingerprint struct {
+	InstanceID          string   `json:"instanceId,omitempty"`
+	NodeName            string   `json:"nodeName,omitempty"`
+	HostnameHash        string   `json:"hostnameHash,omitempty"`
+	MachineIDHash       string   `json:"machineIdHash,omitempty"`
+	MACAddressHashes    []string `json:"macAddressHashes,omitempty"`
+	IPAddressHashes     []string `json:"ipAddressHashes,omitempty"`
+	SupportedJudgeModes []string `json:"supportedJudgeModes,omitempty"`
+	ClientTime          string   `json:"clientTime,omitempty"`
+}
+
+type tempNodeProof struct {
+	Type       string `json:"type,omitempty"`
+	SecretHash string `json:"secretHash,omitempty"`
+}
+
+type tempNodeBinding struct {
+	Fingerprint     tempNodeFingerprint
+	Proof           tempNodeProof
+	FingerprintHash string
+	InstanceSecret  []byte
+}
+
 type tempTokenRequest struct {
-	AuthCode string `json:"authCode"`
-	NodeName string `json:"nodeName"`
+	AuthCode    string               `json:"authCode"`
+	NodeName    string               `json:"nodeName"`
+	Fingerprint *tempNodeFingerprint `json:"fingerprint,omitempty"`
+	Proof       *tempNodeProof       `json:"proof,omitempty"`
 }
 
 type tempTokenResponse struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data struct {
-		Token      string `json:"token"`
-		TokenType  string `json:"tokenType"`
-		NodeID     string `json:"nodeId"`
-		TokenID    string `json:"tokenId"`
-		ExpireTime string `json:"expireTime"`
+		Token           string `json:"token"`
+		TokenType       string `json:"tokenType"`
+		NodeID          string `json:"nodeId"`
+		TokenID         string `json:"tokenId"`
+		ExpireTime      string `json:"expireTime"`
+		FingerprintHash string `json:"fingerprintHash"`
 	} `json:"data"`
 }
 
@@ -342,10 +642,19 @@ func exchangeTempToken(ctx context.Context, cfg config.Config, client *http.Clie
 	if cfg.HnieOJ.TempToken.AuthCode == "" {
 		return nil, errors.New("temp auth code is required")
 	}
-	body, err := json.Marshal(tempTokenRequest{
+	tokenRequest := tempTokenRequest{
 		AuthCode: cfg.HnieOJ.TempToken.AuthCode,
 		NodeName: cfg.Node.Name,
-	})
+	}
+	binding, err := buildTempNodeBinding(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if binding != nil {
+		tokenRequest.Fingerprint = &binding.Fingerprint
+		tokenRequest.Proof = &binding.Proof
+	}
+	body, err := json.Marshal(tokenRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -377,12 +686,23 @@ func exchangeTempToken(ctx context.Context, cfg config.Config, client *http.Clie
 	if err != nil {
 		return nil, err
 	}
+	fingerprintHash := strings.TrimSpace(out.Data.FingerprintHash)
+	if fingerprintHash == "" {
+		fingerprintHash = strings.TrimSpace(cfg.HnieOJ.TempToken.FingerprintHash)
+	}
+	if fingerprintHash == "" && binding != nil {
+		fingerprintHash = binding.FingerprintHash
+	}
 	return &Credential{
-		HeaderName:  "Authorization",
-		HeaderValue: tokenType + " " + out.Data.Token,
-		NodeID:      out.Data.NodeID,
-		TokenID:     out.Data.TokenID,
-		ExpireTime:  expireTime,
+		HeaderName:      "Authorization",
+		HeaderValue:     tokenType + " " + out.Data.Token,
+		NodeID:          out.Data.NodeID,
+		TokenID:         out.Data.TokenID,
+		ExpireTime:      expireTime,
+		InstanceID:      bindingInstanceID(binding),
+		FingerprintHash: fingerprintHash,
+		ProofType:       bindingProofType(binding, cfg.HnieOJ.TempToken.ProofType),
+		InstanceSecret:  bindingSecret(binding),
 	}, nil
 }
 

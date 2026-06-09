@@ -53,6 +53,14 @@ hnieoj:
     tokenId: ""
     # JWT 过期时间。节点会在过期前使用 authCode 刷新。
     expireTime: ""
+    # 临时节点实例 ID。部署脚本会生成并持久化，用于把 JWT 绑定到本机实例。
+    instanceId: ""
+    # 临时节点实例密钥路径。配置后节点会对后续后端请求增加 HMAC 签名。
+    instanceSecretPath: "/etc/hnieoj/judge-security/temp_node_instance_secret"
+    # 后端返回或本机计算的指纹摘要。旧后端未返回时可留空。
+    fingerprintHash: ""
+    # 临时节点请求证明方式。当前仅支持 hmac-sha256。
+    proofType: "hmac-sha256"
 
 rabbitmq:
   # RabbitMQ 连接配置。

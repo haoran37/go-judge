@@ -12,6 +12,8 @@ CACHE_DIR="${CACHE_DIR:-/data/oj/judge-cache}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.yaml}"
 COMPOSE_FILE="${COMPOSE_FILE:-${CONFIG_DIR}/compose.yaml}"
 PRIVATE_KEY_FILE="${PRIVATE_KEY_FILE:-${SECURITY_DIR}/judge_formal_private.pem}"
+TEMP_INSTANCE_ID_FILE="${TEMP_INSTANCE_ID_FILE:-${SECURITY_DIR}/temp_node_instance_id}"
+TEMP_INSTANCE_SECRET_FILE="${TEMP_INSTANCE_SECRET_FILE:-${SECURITY_DIR}/temp_node_instance_secret}"
 
 GOJUDGE_SHM_SIZE="${GOJUDGE_SHM_SIZE:-512m}"
 GOJUDGE_FILE_TIMEOUT="${GOJUDGE_FILE_TIMEOUT:-30m}"
@@ -172,6 +174,48 @@ json_quote() {
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf '"%s"' "${value}"
+}
+
+ensure_file_parent_private() {
+  local file="$1"
+  mkdir -p "$(dirname "${file}")"
+  chmod 700 "$(dirname "${file}")" 2>/dev/null || true
+}
+
+generate_instance_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen
+    return
+  fi
+  if [[ -r /proc/sys/kernel/random/uuid ]]; then
+    tr -d '\r\n' < /proc/sys/kernel/random/uuid
+    return
+  fi
+  printf '%s-%s' "$(hostname 2>/dev/null || printf node)" "$(date '+%s%N')"
+}
+
+generate_instance_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 32
+    return
+  fi
+  require_command base64
+  dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64
+}
+
+prepare_temp_instance_identity() {
+  ensure_file_parent_private "${TEMP_INSTANCE_ID_FILE}"
+  ensure_file_parent_private "${TEMP_INSTANCE_SECRET_FILE}"
+  if [[ ! -s "${TEMP_INSTANCE_ID_FILE}" ]]; then
+    generate_instance_id > "${TEMP_INSTANCE_ID_FILE}"
+  fi
+  if [[ ! -s "${TEMP_INSTANCE_SECRET_FILE}" ]]; then
+    generate_instance_secret > "${TEMP_INSTANCE_SECRET_FILE}"
+  fi
+  chmod 600 "${TEMP_INSTANCE_ID_FILE}" "${TEMP_INSTANCE_SECRET_FILE}" 2>/dev/null || true
+  TEMP_INSTANCE_ID="$(tr -d '\r\n' < "${TEMP_INSTANCE_ID_FILE}")"
+  [[ -n "${TEMP_INSTANCE_ID}" ]] || fail "临时节点实例 ID 为空：${TEMP_INSTANCE_ID_FILE}"
+  log "临时节点实例身份已准备：${TEMP_INSTANCE_ID_FILE}"
 }
 
 validate_node_type() {
@@ -399,6 +443,107 @@ print_deployment_summary() {
   printf '  心跳配置：enabled=%s interval=%s\n' "${heartbeat_enabled:-未知}" "${heartbeat_interval:-未知}"
 }
 
+build_temp_token_request() {
+  local auth_code="$1"
+  local node_name="$2"
+  local supported_modes="$3"
+
+  require_command python3
+  python3 - "${auth_code}" "${node_name}" "${supported_modes}" "${TEMP_INSTANCE_ID_FILE}" "${TEMP_INSTANCE_SECRET_FILE}" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import socket
+import sys
+
+auth_code, node_name, supported_modes, instance_id_file, secret_file = sys.argv[1:6]
+
+def read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+def sha256_text(value):
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+def sha256_bytes(value):
+    return hashlib.sha256(value).hexdigest()
+
+def non_empty(obj):
+    if isinstance(obj, dict):
+        return {k: v for k, v in obj.items() if v not in ("", None, [])}
+    return obj
+
+def machine_id_hash():
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        value = read_text(path)
+        if value:
+            return sha256_text(value)
+    return ""
+
+def mac_hashes():
+    values = set()
+    sys_net = "/sys/class/net"
+    try:
+        names = os.listdir(sys_net)
+    except OSError:
+        return []
+    for name in names:
+        if name == "lo":
+            continue
+        value = read_text(os.path.join(sys_net, name, "address")).lower()
+        if value and value != "00:00:00:00:00:00":
+            values.add(sha256_text(value))
+    return sorted(values)
+
+def ip_hashes():
+    values = set()
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None)
+    except OSError:
+        infos = []
+    for info in infos:
+        ip = info[4][0]
+        if not ip or ip.startswith("127.") or ip == "::1":
+            continue
+        values.add(sha256_text(ip))
+    return sorted(values)
+
+instance_id = read_text(instance_id_file)
+secret = read_text(secret_file).encode("utf-8")
+modes = [item.strip() for item in supported_modes.split(",") if item.strip()]
+fingerprint = non_empty({
+    "instanceId": instance_id,
+    "nodeName": node_name,
+    "hostnameHash": sha256_text(socket.gethostname()),
+    "machineIdHash": machine_id_hash(),
+    "macAddressHashes": mac_hashes(),
+    "ipAddressHashes": ip_hashes(),
+    "supportedJudgeModes": modes,
+    "clientTime": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+})
+stable = dict(fingerprint)
+stable.pop("clientTime", None)
+fingerprint_hash = sha256_bytes(json.dumps(stable, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+payload = {
+    "authCode": auth_code,
+    "nodeName": node_name,
+    "fingerprint": fingerprint,
+    "proof": {
+        "type": "hmac-sha256",
+        "secretHash": sha256_bytes(secret),
+    },
+}
+print(fingerprint_hash)
+print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
 parse_temp_token_response() {
   local response_file="$1"
   if command -v python3 >/dev/null 2>&1; then
@@ -423,6 +568,7 @@ values = [
     data.get("nodeId") or "",
     data.get("tokenId") or "",
     data.get("expireTime") or "",
+    data.get("fingerprintHash") or "",
 ]
 print("\t".join(values))
 PY
@@ -439,7 +585,8 @@ PY
           (.data.tokenType // "Bearer"),
           (.data.nodeId // ""),
           (.data.tokenId // ""),
-          (.data.expireTime // "")
+          (.data.expireTime // ""),
+          (.data.fingerprintHash // "")
         ] | @tsv
       end
     ' "${response_file}"
@@ -453,14 +600,21 @@ exchange_temp_token() {
   local backend_url="$1"
   local node_name="$2"
   local auth_code="$3"
+  local supported_modes="$4"
   local endpoint="${backend_url%/}/api/judge/temp-token"
   local request_body
+  local request_output
   local response_file
   local http_code
   local parsed
 
   require_command curl
-  request_body='{"authCode":'"$(json_quote "${auth_code}")"',"nodeName":'"$(json_quote "${node_name}")"'}'
+  if request_output="$(build_temp_token_request "${auth_code}" "${node_name}" "${supported_modes}")"; then
+    TEMP_FINGERPRINT_HASH="${request_output%%$'\n'*}"
+    request_body="${request_output#*$'\n'}"
+  else
+    return 1
+  fi
   response_file="$(mktemp "${CONFIG_DIR}/temp-token-response.XXXXXX")"
 
   if ! http_code="$(curl -sS --connect-timeout 10 --max-time 30 \
@@ -487,8 +641,11 @@ exchange_temp_token() {
   fi
   rm -f "${response_file}"
 
-  IFS=$'\t' read -r TEMP_JWT TEMP_TOKEN_TYPE TEMP_NODE_ID TEMP_TOKEN_ID TEMP_EXPIRE_TIME <<< "${parsed}"
+  IFS=$'\t' read -r TEMP_JWT TEMP_TOKEN_TYPE TEMP_NODE_ID TEMP_TOKEN_ID TEMP_EXPIRE_TIME TEMP_RESPONSE_FINGERPRINT_HASH <<< "${parsed}"
   [[ -n "${TEMP_JWT}" ]] || return 1
+  if [[ -n "${TEMP_RESPONSE_FINGERPRINT_HASH}" ]]; then
+    TEMP_FINGERPRINT_HASH="${TEMP_RESPONSE_FINGERPRINT_HASH}"
+  fi
   log "临时令牌兑换成功，JWT 过期时间：${TEMP_EXPIRE_TIME:-未知}"
 }
 
@@ -514,6 +671,10 @@ write_config_file() {
   local remote_enabled="${19}"
   local formal_token_group="${20}"
   local formal_token_data_id="${21}"
+  local temp_instance_id="${22}"
+  local temp_instance_secret_path="${23}"
+  local temp_fingerprint_hash="${24}"
+  local temp_proof_type="${25}"
 
   local tmp_file
   tmp_file="$(mktemp "${CONFIG_DIR}/config.yaml.tmp.XXXXXX")"
@@ -574,6 +735,14 @@ hnieoj:
     tokenId: $(yaml_quote "${temp_token_id}")
     # JWT 过期时间。节点会在过期前使用 authCode 刷新。
     expireTime: $(yaml_quote "${temp_expire_time}")
+    # 临时节点实例 ID。由部署脚本生成并持久化，用于把 JWT 绑定到本机实例。
+    instanceId: $(yaml_quote "${temp_instance_id}")
+    # 临时节点实例密钥路径。后续请求会使用该密钥生成 HMAC 签名。
+    instanceSecretPath: $(yaml_quote "${temp_instance_secret_path}")
+    # 后端返回或脚本计算的指纹摘要，后端可据此校验 JWT 是否属于当前节点实例。
+    fingerprintHash: $(yaml_quote "${temp_fingerprint_hash}")
+    # 当前仅支持 hmac-sha256。
+    proofType: $(yaml_quote "${temp_proof_type}")
 
 rabbitmq:
   # RabbitMQ 连接和判题任务队列配置。
@@ -663,6 +832,10 @@ init_config() {
   local temp_node_id=""
   local temp_token_id=""
   local temp_expire_time=""
+  local temp_instance_id=""
+  local temp_instance_secret_path=""
+  local temp_fingerprint_hash=""
+  local temp_proof_type=""
   local nacos_server=""
   local nacos_namespace=""
   local auth_code=""
@@ -697,14 +870,19 @@ init_config() {
       chmod 600 "${PRIVATE_KEY_FILE}" 2>/dev/null || true
     fi
   else
+    prepare_temp_instance_identity
+    temp_instance_id="${TEMP_INSTANCE_ID}"
+    temp_instance_secret_path="${TEMP_INSTANCE_SECRET_FILE}"
+    temp_proof_type="hmac-sha256"
     while true; do
       auth_code="$(prompt_secret_required "临时节点授权码")"
-      if exchange_temp_token "${backend_url}" "${node_name}" "${auth_code}"; then
+      if exchange_temp_token "${backend_url}" "${node_name}" "${auth_code}" "${supported_modes}"; then
         temp_jwt="${TEMP_JWT}"
         temp_token_type="${TEMP_TOKEN_TYPE}"
         temp_node_id="${TEMP_NODE_ID}"
         temp_token_id="${TEMP_TOKEN_ID}"
         temp_expire_time="${TEMP_EXPIRE_TIME}"
+        temp_fingerprint_hash="${TEMP_FINGERPRINT_HASH}"
         break
       fi
       warn "临时授权码无效或已过期，请重新输入"
@@ -715,7 +893,8 @@ init_config() {
     "${rabbit_host}" "${rabbit_port}" "${rabbit_username}" "${rabbit_password}" "${rabbit_vhost}" \
     "${auth_code}" "${temp_jwt}" "${temp_token_type}" "${temp_node_id}" "${temp_token_id}" "${temp_expire_time}" \
     "${nacos_server}" "${nacos_namespace}" "${remote_enabled}" \
-    "${formal_token_group}" "${formal_token_data_id}"
+    "${formal_token_group}" "${formal_token_data_id}" \
+    "${temp_instance_id}" "${temp_instance_secret_path}" "${temp_fingerprint_hash}" "${temp_proof_type}"
 }
 
 render_compose() {
