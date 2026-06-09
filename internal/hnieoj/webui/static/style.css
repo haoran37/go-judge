@@ -446,26 +446,40 @@ textarea {
   overflow-wrap: anywhere;
 }
 
-.notice-backdrop {
+.top-alert {
   position: fixed;
-  inset: 0;
-  z-index: 20;
-  display: grid;
-  place-items: center;
-  background: rgba(18, 30, 48, .42);
-  padding: 24px;
-}
-
-.notice-dialog {
-  width: min(420px, 100%);
+  top: 18px;
+  left: 50%;
+  z-index: 30;
+  width: min(680px, calc(100% - 32px));
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  transform: translateX(-50%);
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: #fff;
-  box-shadow: var(--shadow);
-  padding: 24px;
+  box-shadow: var(--shadow-soft);
+  padding: 12px 14px;
 }
 
-.notice-dialog p {
-  margin-bottom: 18px;
+.top-alert strong {
+  flex: 0 0 auto;
+}
+
+.top-alert span {
+  overflow-wrap: anywhere;
+}
+
+.top-alert.warn {
+  border-color: #f0cf72;
+  background: #fff8df;
+  color: #724b00;
+}
+
+.top-alert.error {
+  border-color: #edb3b3;
+  background: #fff0f0;
+  color: var(--danger);
 }
 
 .ok {

@@ -81,7 +81,9 @@ async function render() {
 
   if (!setup.adminInitialized) {
     if (path !== "/setup-password") {
-      notice = `第一次登录需要先设置管理员密码，完成后才能访问“${routeLabel(path)}”。`;
+      if (path !== "/") {
+        notice = `第一次登录需要先设置管理员密码，完成后才能访问“${routeLabel(path)}”。`;
+      }
       history.replaceState({}, "", "/setup-password");
     }
     renderSetupPassword(notice);
@@ -90,7 +92,9 @@ async function render() {
 
   if (!setup.authenticated) {
     if (path !== "/login") {
-      notice = `请先登录，然后再访问“${routeLabel(path)}”。`;
+      if (path !== "/") {
+        notice = `请先登录，然后再访问“${routeLabel(path)}”。`;
+      }
       history.replaceState({}, "", "/login");
     }
     renderLogin(notice);
@@ -98,7 +102,9 @@ async function render() {
   }
 
   if (!setup.configured && !path.startsWith("/configure")) {
-    notice = `判题节点还没有完成配置，先完成配置后才能访问“${routeLabel(path)}”。`;
+    if (path !== "/") {
+      notice = `判题节点还没有完成配置，先完成配置后才能访问“${routeLabel(path)}”。`;
+    }
     history.replaceState({}, "", "/configure");
     await renderAuthed("/configure", notice);
     return;
@@ -147,9 +153,8 @@ function renderSetupPassword(notice) {
           <div id="message" class="message" role="status"></div>
         </form>
       </section>
-      ${noticeDialog(notice)}
+      ${topAlert(notice, "warn")}
     </main>`;
-  bindNoticeDialog();
   document.getElementById("setup-form").onsubmit = async (event) => {
     event.preventDefault();
     await submitWithMessage("message", async () => {
@@ -183,9 +188,8 @@ function renderLogin(notice) {
           <div id="message" class="message" role="status"></div>
         </form>
       </section>
-      ${noticeDialog(notice)}
+      ${topAlert(notice, "warn")}
     </main>`;
-  bindNoticeDialog();
   document.getElementById("login-form").onsubmit = async (event) => {
     event.preventDefault();
     await submitWithMessage("message", async () => {
@@ -260,10 +264,9 @@ function renderShell(active, title, content, notice = "") {
         </header>
         ${content}
       </main>
-      ${noticeDialog(notice)}
+      ${topAlert(notice, "warn")}
     </div>`;
 
-  bindNoticeDialog();
   document.querySelectorAll("[data-link]").forEach((link) => {
     link.addEventListener("click", (event) => {
       event.preventDefault();
@@ -620,6 +623,7 @@ async function submitWithMessage(messageID, action, success = "") {
       message.classList.add("ok");
     }
   } catch (err) {
+    showRuntimeAlert(err.message, "error");
     if (message) {
       message.textContent = err.message;
       message.classList.add("error");
@@ -627,22 +631,21 @@ async function submitWithMessage(messageID, action, success = "") {
   }
 }
 
-function noticeDialog(message) {
+function topAlert(message, type = "warn", extraClass = "") {
   if (!message) return "";
   return `
-    <div class="notice-backdrop">
-      <section class="notice-dialog" role="alertdialog" aria-modal="true">
-        <h2>需要先完成当前步骤</h2>
-        <p>${escapeHTML(message)}</p>
-        <button id="notice-close" class="primary">知道了</button>
-      </section>
+    <div class="top-alert ${type} ${extraClass}" role="status">
+      <strong>${type === "error" ? "错误" : "提示"}</strong>
+      <span>${escapeHTML(message)}</span>
     </div>`;
 }
 
-function bindNoticeDialog() {
-  const close = document.getElementById("notice-close");
-  if (close) {
-    close.onclick = () => document.querySelector(".notice-backdrop")?.remove();
+function showRuntimeAlert(message, type = "error") {
+  document.querySelectorAll(".top-alert.runtime").forEach((item) => item.remove());
+  document.body.insertAdjacentHTML("beforeend", topAlert(message, type, "runtime"));
+  const alert = document.querySelector(".top-alert.runtime");
+  if (alert) {
+    setTimeout(() => alert.remove(), 5000);
   }
 }
 
