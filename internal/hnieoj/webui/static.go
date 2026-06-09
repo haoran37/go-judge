@@ -1,9 +1,13 @@
 package webui
 
 import (
+	"bytes"
 	"embed"
+	"io"
 	"io/fs"
 	"net/http"
+	"path"
+	"strings"
 )
 
 //go:embed static/*
@@ -14,5 +18,48 @@ func StaticHandler() http.Handler {
 	if err != nil {
 		panic(err)
 	}
-	return http.FileServer(http.FS(sub))
+	return spaHandler{fs: sub}
+}
+
+type spaHandler struct {
+	fs fs.FS
+}
+
+func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		http.NotFound(w, r)
+		return
+	}
+	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+	if name == "." || name == "" {
+		name = "index.html"
+	}
+	file, err := h.fs.Open(name)
+	if err != nil {
+		h.serveIndex(w, r)
+		return
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil || stat.IsDir() {
+		h.serveIndex(w, r)
+		return
+	}
+	body, err := io.ReadAll(file)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeContent(w, r, name, stat.ModTime(), bytes.NewReader(body))
+}
+
+func (h spaHandler) serveIndex(w http.ResponseWriter, r *http.Request) {
+	file, err := h.fs.Open("index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.Copy(w, file)
 }

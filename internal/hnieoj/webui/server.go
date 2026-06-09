@@ -16,6 +16,7 @@ import (
 )
 
 const sessionCookie = "hnieoj_judge_session"
+const sessionTTL = 2 * time.Hour
 
 type Server struct {
 	store      *Store
@@ -296,19 +297,28 @@ func (s *Server) handleSetupFormal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	base := *config.Default()
+	base, err := s.configBase()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	cfg, err := dtoToConfig(req.Config, base)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	keyPath, err := s.store.SaveFormalPrivateKey(req.PrivateKeyPEM)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if strings.TrimSpace(req.PrivateKeyPEM) != "" {
+		keyPath, err := s.store.SaveFormalPrivateKey(req.PrivateKeyPEM)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg.HnieOJ.FormalToken.PrivateKeyPath = keyPath
+	} else if strings.TrimSpace(cfg.HnieOJ.FormalToken.PrivateKeyPath) == "" {
+		http.Error(w, "formal private key pem is required", http.StatusBadRequest)
 		return
 	}
 	cfg.Node.Type = "formal"
-	cfg.HnieOJ.FormalToken.PrivateKeyPath = keyPath
 	cfg.HnieOJ.TempToken = config.TempToken{ProofType: "hmac-sha256"}
 	if err := cfg.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -335,7 +345,12 @@ func (s *Server) handleSetupTemp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	cfg, err := dtoToConfig(req.Config, *config.Default())
+	base, err := s.configBase()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cfg, err := dtoToConfig(req.Config, base)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -437,8 +452,14 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) issueSession(w http.ResponseWriter) {
 	token := randomToken(32)
-	expires := time.Now().Add(24 * time.Hour)
+	expires := time.Now().Add(sessionTTL)
 	s.sessionsMu.Lock()
+	now := time.Now()
+	for existing, existingExpires := range s.sessions {
+		if now.After(existingExpires) {
+			delete(s.sessions, existing)
+		}
+	}
 	s.sessions[token] = expires
 	s.sessionsMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
@@ -460,6 +481,17 @@ func (s *Server) validSession(token string) bool {
 		return false
 	}
 	return true
+}
+
+func (s *Server) configBase() (config.Config, error) {
+	current, exists, err := s.store.LoadConfig()
+	if err != nil {
+		return config.Config{}, err
+	}
+	if !exists {
+		return *config.Default(), nil
+	}
+	return *current, nil
 }
 
 func fillTempCredential(cfg *config.Config, cred *auth.Credential) {
