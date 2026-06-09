@@ -71,6 +71,16 @@ sudo WEBUI_HOST_PORT=8080 bash /tmp/hnieoj-judge-node.sh deploy
 
 容器内 WebUI 固定监听 `3723`，不需要给程序额外传端口参数。
 
+## 开发测试脚本
+
+在测试机器上可以直接拉取 `develop` 最新代码并本地构建镜像：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/develop/deploy/dev-build-run.sh -o /tmp/hnieoj-dev-build-run.sh && sudo bash /tmp/hnieoj-dev-build-run.sh deploy
+```
+
+该脚本默认构建 `haoran37/hnieoj-go-judge:dev-local`，并启动 `hnieoj-judge-node-dev` 容器。开发状态目录默认在 `/tmp/hnieoj-judge-node-dev/state`，不会覆盖生产脚本默认目录。
+
 ## 注意事项
 
 - 不要把 go-judge 沙箱 HTTP 端口暴露到公网；WebUI 会在容器内管理沙箱进程。
