@@ -38,35 +38,45 @@ type Metrics struct {
 	RetryableTasks int64 `json:"retryableTasks"`
 }
 
+type MetricBucket struct {
+	Time           time.Time `json:"time"`
+	StartedTasks   int64     `json:"startedTasks"`
+	FinishedTasks  int64     `json:"finishedTasks"`
+	FailedTasks    int64     `json:"failedTasks"`
+	RetryableTasks int64     `json:"retryableTasks"`
+}
+
 type Status struct {
-	State        State      `json:"state"`
-	Configured   bool       `json:"configured"`
-	NodeName     string     `json:"nodeName"`
-	NodeType     string     `json:"nodeType"`
-	RunningTasks int64      `json:"runningTasks"`
-	StartedAt    *time.Time `json:"startedAt,omitempty"`
-	StoppedAt    *time.Time `json:"stoppedAt,omitempty"`
-	LastError    string     `json:"lastError,omitempty"`
-	Metrics      Metrics    `json:"metrics"`
+	State         State          `json:"state"`
+	Configured    bool           `json:"configured"`
+	NodeName      string         `json:"nodeName"`
+	NodeType      string         `json:"nodeType"`
+	RunningTasks  int64          `json:"runningTasks"`
+	StartedAt     *time.Time     `json:"startedAt,omitempty"`
+	StoppedAt     *time.Time     `json:"stoppedAt,omitempty"`
+	LastError     string         `json:"lastError,omitempty"`
+	Metrics       Metrics        `json:"metrics"`
+	RecentMetrics []MetricBucket `json:"recentMetrics"`
 }
 
 type Manager struct {
-	mu      sync.Mutex
-	cfg     *config.Config
-	logger  logging.Logger
-	state   State
-	cancel  context.CancelFunc
-	done    chan struct{}
-	started time.Time
-	stopped time.Time
-	lastErr string
-	running atomic.Int64
-	metrics Metrics
-	sandbox *exec.Cmd
+	mu            sync.Mutex
+	cfg           *config.Config
+	logger        logging.Logger
+	state         State
+	cancel        context.CancelFunc
+	done          chan struct{}
+	started       time.Time
+	stopped       time.Time
+	lastErr       string
+	running       atomic.Int64
+	metrics       Metrics
+	metricBuckets map[int64]*MetricBucket
+	sandbox       *exec.Cmd
 }
 
 func NewManager(logger logging.Logger) *Manager {
-	return &Manager{logger: logger, state: StateStopped}
+	return &Manager{logger: logger, state: StateStopped, metricBuckets: map[int64]*MetricBucket{}}
 }
 
 func (m *Manager) SetConfig(cfg config.Config) {
@@ -169,11 +179,12 @@ func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	status := Status{
-		State:        m.state,
-		Configured:   m.cfg != nil,
-		RunningTasks: m.running.Load(),
-		LastError:    m.lastErr,
-		Metrics:      m.metrics,
+		State:         m.state,
+		Configured:    m.cfg != nil,
+		RunningTasks:  m.running.Load(),
+		LastError:     m.lastErr,
+		Metrics:       m.metrics,
+		RecentMetrics: m.recentMetricsLocked(),
 	}
 	if m.cfg != nil {
 		status.NodeName = m.cfg.Node.Name
@@ -217,10 +228,10 @@ func (m *Manager) run(ctx context.Context, cfg config.Config, done chan struct{}
 
 func (m *Manager) wrapProcess(handler func(context.Context, model.Task) error) func(context.Context, model.Task) error {
 	return func(ctx context.Context, task model.Task) error {
-		m.addMetric(func(metrics *Metrics) { metrics.StartedTasks++ })
+		m.recordMetric(func(metrics *Metrics) { metrics.StartedTasks++ })
 		err := handler(ctx, task)
 		if err != nil {
-			m.addMetric(func(metrics *Metrics) {
+			m.recordMetric(func(metrics *Metrics) {
 				metrics.FailedTasks++
 				var retryable processor.ErrRetryable
 				if errors.As(err, &retryable) {
@@ -229,15 +240,68 @@ func (m *Manager) wrapProcess(handler func(context.Context, model.Task) error) f
 			})
 			return err
 		}
-		m.addMetric(func(metrics *Metrics) { metrics.FinishedTasks++ })
+		m.recordMetric(func(metrics *Metrics) { metrics.FinishedTasks++ })
 		return nil
 	}
 }
 
-func (m *Manager) addMetric(update func(*Metrics)) {
+func (m *Manager) recordMetric(update func(*Metrics)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	update(&m.metrics)
+	now := time.Now()
+	bucket := m.currentMetricBucketLocked(now)
+	bucketMetrics := Metrics{
+		StartedTasks:   bucket.StartedTasks,
+		FinishedTasks:  bucket.FinishedTasks,
+		FailedTasks:    bucket.FailedTasks,
+		RetryableTasks: bucket.RetryableTasks,
+	}
+	update(&bucketMetrics)
+	bucket.StartedTasks = bucketMetrics.StartedTasks
+	bucket.FinishedTasks = bucketMetrics.FinishedTasks
+	bucket.FailedTasks = bucketMetrics.FailedTasks
+	bucket.RetryableTasks = bucketMetrics.RetryableTasks
+	m.pruneMetricBucketsLocked(now)
+}
+
+func (m *Manager) currentMetricBucketLocked(now time.Time) *MetricBucket {
+	if m.metricBuckets == nil {
+		m.metricBuckets = map[int64]*MetricBucket{}
+	}
+	minute := now.UTC().Truncate(time.Minute)
+	key := minute.Unix()
+	bucket := m.metricBuckets[key]
+	if bucket == nil {
+		bucket = &MetricBucket{Time: minute}
+		m.metricBuckets[key] = bucket
+	}
+	return bucket
+}
+
+func (m *Manager) recentMetricsLocked() []MetricBucket {
+	now := time.Now()
+	m.pruneMetricBucketsLocked(now)
+	start := now.UTC().Truncate(time.Minute).Add(-29 * time.Minute)
+	out := make([]MetricBucket, 0, 30)
+	for i := 0; i < 30; i++ {
+		t := start.Add(time.Duration(i) * time.Minute)
+		if bucket := m.metricBuckets[t.Unix()]; bucket != nil {
+			out = append(out, *bucket)
+			continue
+		}
+		out = append(out, MetricBucket{Time: t})
+	}
+	return out
+}
+
+func (m *Manager) pruneMetricBucketsLocked(now time.Time) {
+	cutoff := now.UTC().Truncate(time.Minute).Add(-30 * time.Minute).Unix()
+	for key := range m.metricBuckets {
+		if key < cutoff {
+			delete(m.metricBuckets, key)
+		}
+	}
 }
 
 func (m *Manager) fail(err error) {

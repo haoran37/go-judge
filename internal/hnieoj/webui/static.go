@@ -35,6 +35,7 @@ var spaRoutes = map[string]struct{}{
 	"/dashboard":        {},
 	"/operations":       {},
 	"/logs":             {},
+	"/cache":            {},
 }
 
 func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

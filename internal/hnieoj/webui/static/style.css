@@ -278,6 +278,12 @@ p {
   margin-bottom: 18px;
 }
 
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, .8fr);
+  gap: 18px;
+}
+
 .metric {
   min-height: 128px;
   border: 1px solid var(--line);
@@ -328,6 +334,72 @@ p {
   overflow-wrap: anywhere;
 }
 
+.chart-wrap {
+  display: grid;
+  gap: 10px;
+}
+
+.line-chart {
+  width: 100%;
+  min-height: 220px;
+}
+
+.line-chart line {
+  stroke: var(--line);
+  stroke-width: 2;
+}
+
+.line-chart path {
+  fill: none;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.line-chart .started,
+.chart-legend .started {
+  stroke: var(--primary);
+  color: var(--primary);
+}
+
+.line-chart .finished,
+.chart-legend .finished {
+  stroke: var(--ok);
+  color: var(--ok);
+}
+
+.line-chart .failed,
+.chart-legend .failed {
+  stroke: var(--danger);
+  color: var(--danger);
+}
+
+.chart-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-weight: 700;
+}
+
+.pie-row {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 20px;
+  align-items: center;
+}
+
+.pie {
+  width: 180px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 16px rgba(255, 255, 255, .72);
+}
+
+.pie-legend {
+  display: grid;
+  gap: 10px;
+}
+
 .choice-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -367,6 +439,29 @@ p {
 
 .form-grid.two {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.checkbox-group {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 8px 10px;
+  font-weight: 700;
+}
+
+.checkbox input {
+  width: auto;
 }
 
 .field {
@@ -446,6 +541,28 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.cache-list {
+  margin-top: 14px;
+  overflow-x: auto;
+}
+
+.cache-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.cache-table th,
+.cache-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.cache-table th {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .top-alert {
   position: fixed;
   top: 18px;
@@ -519,6 +636,7 @@ textarea {
   }
 
   .metric-grid,
+  .dashboard-grid,
   .choice-grid,
   .kv-grid,
   .token-summary,

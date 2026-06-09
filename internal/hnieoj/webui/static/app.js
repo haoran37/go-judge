@@ -10,6 +10,7 @@ const routes = new Set([
   "/dashboard",
   "/operations",
   "/logs",
+  "/cache",
 ]);
 
 const routeNames = {
@@ -19,6 +20,7 @@ const routeNames = {
   "/configure/temp": "临时节点配置",
   "/operations": "操作",
   "/logs": "日志",
+  "/cache": "缓存",
 };
 
 let setup = null;
@@ -67,6 +69,14 @@ async function loadConfig() {
     currentConfig = await api("/api/v1/config");
   }
   return currentConfig;
+}
+
+async function loadSystemInfo() {
+  try {
+    return await api("/api/v1/system/info");
+  } catch {
+    return {};
+  }
 }
 
 async function render() {
@@ -225,9 +235,13 @@ async function renderAuthed(path, notice) {
       renderShell("logs", "运行日志", logsHTML(), notice);
       await loadLogs();
       break;
+    case "/cache":
+      renderShell("cache", "测试数据缓存", cacheHTML(), notice);
+      await loadCache();
+      break;
     case "/dashboard":
     default:
-      renderShell("dashboard", "节点概览", dashboardHTML(), notice);
+      renderShell("dashboard", "节点概览", dashboardHTML(await loadSystemInfo()), notice);
       break;
   }
 }
@@ -248,6 +262,7 @@ function renderShell(active, title, content, notice = "") {
           ${navLink("/configure", "配置", active === "configure")}
           ${navLink("/operations", "操作", active === "operations")}
           ${navLink("/logs", "日志", active === "logs")}
+          ${navLink("/cache", "缓存", active === "cache")}
         </nav>
         <div class="sidebar-bottom">
           <span class="state-pill ${stateClass(runtime.state)}">${stateText(runtime.state)}</span>
@@ -309,14 +324,35 @@ function bindConfigureChoice() {
   document.getElementById("choose-temp").onclick = () => navigate("/configure/temp");
 }
 
-function dashboardHTML() {
+function dashboardHTML(system) {
   const metrics = runtime.metrics || {};
+  const recent = runtime.recentMetrics || [];
   return `
     <section class="metric-grid">
       ${metric("运行状态", stateText(runtime.state), stateClass(runtime.state))}
       ${metric("运行任务", runtime.runningTasks || 0)}
       ${metric("已完成", metrics.finishedTasks || 0)}
       ${metric("失败任务", metrics.failedTasks || 0, metrics.failedTasks ? "error" : "")}
+    </section>
+    <section class="panel">
+      <h2>近期任务量</h2>
+      ${lineChart(recent)}
+    </section>
+    <section class="dashboard-grid">
+      <section class="panel">
+        <h2>判题结果占比</h2>
+        ${pieChart(metrics)}
+      </section>
+      <section class="panel">
+        <h2>系统信息</h2>
+        <div class="kv-grid">
+          ${kv("CPU 核数", system.cpuCore || "-")}
+          ${kv("Go 协程", system.goRoutines || "-")}
+          ${kv("进程内存", formatBytes(system.processAllocBytes || 0))}
+          ${kv("系统内存", memoryText(system.memoryTotalBytes, system.memoryFreeBytes))}
+          ${kv("磁盘可用", diskText(system.diskTotalBytes, system.diskFreeBytes))}
+        </div>
+      </section>
     </section>
     <section class="panel">
       <h2>节点信息</h2>
@@ -373,7 +409,7 @@ function configFormHTML(mode, cfg) {
           ${field("节点名称", "node-name", c.node.name)}
           ${field("最大并发", "max-concurrency", c.node.maxConcurrency, "number")}
           ${field("HnieOJ 后端地址", "base-url", c.hnieoj.baseUrl, "text", "http://gateway:8800")}
-          ${field("判题模式", "judge-modes", c.node.supportedJudgeModes.join(","))}
+          ${judgeModeCheckboxes(c.node.supportedJudgeModes)}
           ${field("心跳间隔", "heartbeat-interval", c.heartbeat.interval || "30s")}
         </div>
       </section>
@@ -388,6 +424,7 @@ function configFormHTML(mode, cfg) {
           ${field("vhost", "rabbit-vhost", c.rabbitmq.virtualHost)}
         </div>
       </section>
+      ${cacheConfigHTML(c)}
       ${mode === "formal" ? formalKeyHTML(c) : tempAuthHTML(c)}
       <section class="form-footer">
         ${mode === "formal" ? `<button class="primary" type="submit">保存正式节点配置</button>` : tempButtonsHTML()}
@@ -428,6 +465,41 @@ function formalNacosHTML(cfg) {
         ${field("刷新间隔", "formal-refresh-interval", cfg.hnieoj.formalToken.refreshInterval || "30s")}
       </div>
     </section>`;
+}
+
+function cacheConfigHTML(cfg) {
+  const testdata = cfg.testdata || {};
+  return `
+    <section class="panel">
+      <h2>测试数据缓存</h2>
+      <div class="form-grid two">
+        ${field("缓存目录", "cache-root", testdata.cacheRoot || "/data/oj/judge-cache")}
+        ${field("最大缓存大小 GiB", "cache-max-gib", bytesToGiB(testdata.maxCacheBytes || 0), "number")}
+        ${field("最大未使用时间", "cache-max-unused", testdata.maxUnusedDuration || "72h")}
+        ${field("清理间隔", "cache-cleanup-interval", testdata.cleanupInterval || "1h")}
+        ${field("统计刷新间隔", "cache-stats-interval", testdata.statsInterval || "5m")}
+      </div>
+    </section>`;
+}
+
+function judgeModeCheckboxes(selectedModes = []) {
+  const selected = new Set(selectedModes.length ? selectedModes : ["default"]);
+  const options = [
+    ["default", "普通题"],
+    ["spj", "SPJ"],
+    ["interactive", "交互题"],
+  ];
+  return `
+    <div class="field">
+      <label>判题模式</label>
+      <div class="checkbox-group">
+        ${options.map(([value, label]) => `
+          <label class="checkbox">
+            <input type="checkbox" name="judge-mode" value="${value}" ${selected.has(value) ? "checked" : ""}>
+            <span>${label}</span>
+          </label>`).join("")}
+      </div>
+    </div>`;
 }
 
 function tempAuthHTML(cfg) {
@@ -525,7 +597,7 @@ function formConfig(mode) {
       name: value("node-name"),
       type: mode,
       maxConcurrency,
-      supportedJudgeModes: value("judge-modes").split(",").map((item) => item.trim()).filter(Boolean),
+      supportedJudgeModes: selectedJudgeModes(),
     },
     hnieoj: {
       baseUrl: value("base-url"),
@@ -559,11 +631,11 @@ function formConfig(mode) {
       retryBackoff: "10s",
     },
     testdata: {
-      cacheRoot: "/data/oj/judge-cache",
-      maxCacheBytes: 21474836480,
-      maxUnusedDuration: "72h",
-      cleanupInterval: "1h",
-      statsInterval: "5m",
+      cacheRoot: value("cache-root") || "/data/oj/judge-cache",
+      maxCacheBytes: giBToBytes(value("cache-max-gib") || "20"),
+      maxUnusedDuration: value("cache-max-unused") || "72h",
+      cleanupInterval: value("cache-cleanup-interval") || "1h",
+      statsInterval: value("cache-stats-interval") || "5m",
     },
     gojudge: { endpoint: "http://127.0.0.1:5050" },
     reporter: { mode: "http", endpoint: "/judge/submissions/{submissionId}/events" },
@@ -589,6 +661,53 @@ async function loadLogs() {
     : `<p>暂无日志</p>`;
 }
 
+function cacheHTML() {
+  return `
+    <section class="panel">
+      <div class="button-row">
+        <button id="refresh-cache">刷新缓存</button>
+        <button id="cleanup-cache" class="danger">按策略清理</button>
+      </div>
+      <div id="cache-message" class="message" role="status"></div>
+      <div id="cache-list" class="cache-list">正在加载缓存</div>
+    </section>`;
+}
+
+async function loadCache() {
+  const data = await api("/api/v1/testdata/cache");
+  const items = data.items || [];
+  document.getElementById("cache-list").innerHTML = items.length ? `
+    <table class="cache-table">
+      <thead><tr><th>题目 ID</th><th>版本</th><th>大小</th><th>最近使用</th><th>操作</th></tr></thead>
+      <tbody>
+        ${items.map((item) => `
+          <tr>
+            <td>${item.problemId}</td>
+            <td>${item.version || "-"}</td>
+            <td>${formatBytes(item.sizeBytes || 0)}</td>
+            <td>${formatTime(item.lastUsed)}</td>
+            <td><button data-delete-cache="${item.problemId}" class="danger">删除</button></td>
+          </tr>`).join("")}
+      </tbody>
+    </table>` : `<p>暂无已缓存测试数据</p>`;
+  document.getElementById("refresh-cache").onclick = () => loadCache().catch(showFatal);
+  document.getElementById("cleanup-cache").onclick = async () => {
+    await submitWithMessage("cache-message", async () => {
+      const result = await api("/api/v1/testdata/cache/cleanup", { method: "POST" });
+      await loadCache();
+      return result;
+    }, "缓存清理完成");
+  };
+  document.querySelectorAll("[data-delete-cache]").forEach((button) => {
+    button.onclick = async () => {
+      await submitWithMessage("cache-message", async () => {
+        await api(`/api/v1/testdata/cache/${button.dataset.deleteCache}`, { method: "DELETE" });
+        await loadCache();
+      }, "缓存已删除");
+    };
+  });
+}
+
 function normalizedConfig(cfg = {}) {
   const fallback = {
     node: { name: "judge-node-01", maxConcurrency: 2, supportedJudgeModes: ["default"] },
@@ -607,6 +726,7 @@ function normalizedConfig(cfg = {}) {
     },
     rabbitmq: { host: "rabbitmq", port: 5672, username: "hnieoj_judge", virtualHost: "hnieoj" },
     heartbeat: { interval: "30s" },
+    testdata: { cacheRoot: "/data/oj/judge-cache", maxCacheBytes: 21474836480, maxUnusedDuration: "72h", cleanupInterval: "1h", statsInterval: "5m" },
   };
   return {
     ...fallback,
@@ -627,7 +747,53 @@ function normalizedConfig(cfg = {}) {
     },
     rabbitmq: { ...fallback.rabbitmq, ...(cfg.rabbitmq || {}) },
     heartbeat: { ...fallback.heartbeat, ...(cfg.heartbeat || {}) },
+    testdata: { ...fallback.testdata, ...(cfg.testdata || {}) },
   };
+}
+
+function lineChart(points = []) {
+  const width = 720;
+  const height = 220;
+  const padding = 24;
+  const values = points.map((point) => ({
+    started: Number(point.startedTasks || 0),
+    finished: Number(point.finishedTasks || 0),
+    failed: Number(point.failedTasks || 0),
+  }));
+  const max = Math.max(1, ...values.flatMap((item) => [item.started, item.finished, item.failed]));
+  const x = (index) => padding + (index * (width - padding * 2)) / Math.max(1, values.length - 1);
+  const y = (value) => height - padding - (value * (height - padding * 2)) / max;
+  const path = (key) => values.map((item, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(item[key]).toFixed(1)}`).join(" ");
+  return `
+    <div class="chart-wrap">
+      <svg viewBox="0 0 ${width} ${height}" class="line-chart" role="img" aria-label="近期任务量">
+        <line x1="${padding}" y1="${height - padding}" x2="${width - padding}" y2="${height - padding}" />
+        <path class="started" d="${path("started")}"></path>
+        <path class="finished" d="${path("finished")}"></path>
+        <path class="failed" d="${path("failed")}"></path>
+      </svg>
+      <div class="chart-legend">
+        <span class="started">进入</span><span class="finished">完成</span><span class="failed">失败</span>
+      </div>
+    </div>`;
+}
+
+function pieChart(metrics = {}) {
+  const finished = Number(metrics.finishedTasks || 0);
+  const failed = Number(metrics.failedTasks || 0);
+  const retryable = Number(metrics.retryableTasks || 0);
+  const total = Math.max(1, finished + failed + retryable);
+  const successDeg = (finished / total) * 360;
+  const failedDeg = (failed / total) * 360;
+  return `
+    <div class="pie-row">
+      <div class="pie" style="background: conic-gradient(var(--ok) 0 ${successDeg}deg, var(--danger) ${successDeg}deg ${successDeg + failedDeg}deg, var(--warning) ${successDeg + failedDeg}deg 360deg)"></div>
+      <div class="pie-legend">
+        ${kv("成功", finished)}
+        ${kv("失败", failed)}
+        ${kv("可重试", retryable)}
+      </div>
+    </div>`;
 }
 
 function metric(label, metricValue, className = "") {
@@ -648,6 +814,44 @@ function field(label, id, fieldValue = "", type = "text", placeholder = "") {
 
 function value(id) {
   return document.getElementById(id)?.value.trim() || "";
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let size = value / 1024;
+  for (const unit of units) {
+    if (size < 1024) return `${Math.round(size * 10) / 10} ${unit}`;
+    size /= 1024;
+  }
+  return `${Math.round(size * 10) / 10} PiB`;
+}
+
+function memoryText(total, free) {
+  if (!total) return "不可用";
+  return `${formatBytes(total - free)} / ${formatBytes(total)}`;
+}
+
+function diskText(total, free) {
+  if (!total) return "不可用";
+  return `${formatBytes(free)} 可用 / ${formatBytes(total)}`;
+}
+
+function selectedJudgeModes() {
+  const modes = Array.from(document.querySelectorAll('input[name="judge-mode"]:checked')).map((item) => item.value);
+  return modes.length ? modes : ["default"];
+}
+
+function bytesToGiB(bytes) {
+  if (!bytes) return 20;
+  return Math.round((Number(bytes) / 1024 / 1024 / 1024) * 10) / 10;
+}
+
+function giBToBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.round(number * 1024 * 1024 * 1024);
 }
 
 async function submitWithMessage(messageID, action, success = "") {
@@ -699,6 +903,7 @@ function headerSubtitle(active) {
     configure: "配置正式节点或临时节点的连接信息。",
     operations: "启动、停止或重启容器内判题服务。",
     logs: "查看 WebUI 记录的最近运行日志。",
+    cache: "查看、清理和配置本地测试数据缓存。",
   };
   return map[active] || "";
 }

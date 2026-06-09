@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/criyle/go-judge/internal/hnieoj/config"
 	"github.com/criyle/go-judge/internal/hnieoj/logging"
 	"github.com/criyle/go-judge/internal/hnieoj/node"
+	"github.com/criyle/go-judge/internal/hnieoj/testdata"
 )
 
 const sessionCookie = "hnieoj_judge_session"
@@ -151,7 +153,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/runtime/restart", s.withAuth(s.handleRestart))
 	mux.HandleFunc("/api/v1/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("/api/v1/metrics/summary", s.withAuth(s.handleStatus))
+	mux.HandleFunc("/api/v1/system/info", s.withAuth(s.handleSystemInfo))
 	mux.HandleFunc("/api/v1/logs/recent", s.withAuth(s.handleLogs))
+	mux.HandleFunc("/api/v1/testdata/cache", s.withAuth(s.handleTestdataCache))
+	mux.HandleFunc("/api/v1/testdata/cache/cleanup", s.withAuth(s.handleTestdataCacheCleanup))
+	mux.HandleFunc("/api/v1/testdata/cache/", s.withAuth(s.handleTestdataCacheItem))
 	mux.Handle("/", StaticHandler())
 	return mux
 }
@@ -435,6 +441,74 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.logs.Recent())
 }
 
+func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.effectiveConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, collectSystemInfo(cfg.Testdata.CacheRoot))
+}
+
+func (s *Server) handleTestdataCache(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	cfg, err := s.effectiveConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	items, err := testdata.ListCache(cfg.Testdata.CacheRoot)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"items": items})
+}
+
+func (s *Server) handleTestdataCacheCleanup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	cfg, err := s.effectiveConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	result, err := testdata.Cleanup(cfg.Testdata.CacheRoot, cfg.Testdata.MaxCacheBytes, cfg.Testdata.MaxUnusedDuration)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) handleTestdataCacheItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	cfg, err := s.effectiveConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	idText := strings.TrimPrefix(r.URL.Path, "/api/v1/testdata/cache/")
+	problemID, err := strconv.ParseInt(strings.TrimSpace(idText), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid problem id", http.StatusBadRequest)
+		return
+	}
+	if err := testdata.DeleteCachedProblem(cfg.Testdata.CacheRoot, problemID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.store.AdminInitialized() {
@@ -492,6 +566,20 @@ func (s *Server) configBase() (config.Config, error) {
 		return *config.Default(), nil
 	}
 	return *current, nil
+}
+
+func (s *Server) effectiveConfig() (*config.Config, error) {
+	if cfg, ok := s.manager.Config(); ok {
+		return cfg, nil
+	}
+	stored, exists, err := s.store.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return stored, nil
+	}
+	return config.Default(), nil
 }
 
 func fillTempCredential(cfg *config.Config, cred *auth.Credential) {
