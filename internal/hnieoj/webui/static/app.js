@@ -12,6 +12,15 @@ const routes = new Set([
   "/logs",
 ]);
 
+const routeNames = {
+  "/dashboard": "概览",
+  "/configure": "配置",
+  "/configure/formal": "正式节点配置",
+  "/configure/temp": "临时节点配置",
+  "/operations": "操作",
+  "/logs": "日志",
+};
+
 let setup = null;
 let runtime = {};
 let currentConfig = null;
@@ -39,9 +48,9 @@ window.addEventListener("popstate", () => render().catch(showFatal));
 
 function showFatal(err) {
   app.innerHTML = `
-    <main class="auth-page">
-      <section class="login-panel">
-        <img src="/hie.svg" class="logo" alt="HnieOJ">
+    <main class="auth-shell">
+      <section class="auth-card">
+        <img src="/hie.svg" class="auth-logo" alt="HnieOJ">
         <h1>控制台加载失败</h1>
         <p class="error">${escapeHTML(err.message)}</p>
       </section>
@@ -62,40 +71,45 @@ async function loadConfig() {
 
 async function render() {
   await loadSetupStatus();
-  const path = normalizePath(location.pathname);
+  let path = normalizePath(location.pathname);
+  let notice = "";
 
   if (!routes.has(path)) {
-    navigate(setup.configured ? "/dashboard" : "/configure", true);
-    return;
+    path = setup.configured ? "/dashboard" : "/configure";
+    history.replaceState({}, "", path);
   }
 
   if (!setup.adminInitialized) {
     if (path !== "/setup-password") {
+      notice = `第一次登录需要先设置管理员密码，完成后才能访问“${routeLabel(path)}”。`;
       history.replaceState({}, "", "/setup-password");
     }
-    renderSetupPassword();
+    renderSetupPassword(notice);
     return;
   }
 
   if (!setup.authenticated) {
     if (path !== "/login") {
+      notice = `请先登录，然后再访问“${routeLabel(path)}”。`;
       history.replaceState({}, "", "/login");
     }
-    renderLogin();
+    renderLogin(notice);
     return;
   }
 
   if (!setup.configured && !path.startsWith("/configure")) {
+    notice = `判题节点还没有完成配置，先完成配置后才能访问“${routeLabel(path)}”。`;
     history.replaceState({}, "", "/configure");
-    await renderAuthed("/configure");
+    await renderAuthed("/configure", notice);
     return;
   }
 
   if (path === "/" || path === "/setup-password" || path === "/login") {
-    history.replaceState({}, "", setup.configured ? "/dashboard" : "/configure");
+    path = setup.configured ? "/dashboard" : "/configure";
+    history.replaceState({}, "", path);
   }
 
-  await renderAuthed(normalizePath(location.pathname));
+  await renderAuthed(normalizePath(location.pathname), "");
 }
 
 function normalizePath(path) {
@@ -103,36 +117,39 @@ function normalizePath(path) {
   return path.replace(/\/+$/, "") || "/";
 }
 
-function renderSetupPassword() {
+function renderSetupPassword(notice) {
   app.innerHTML = `
-    <main class="auth-page">
-      <section class="login-panel">
-        <div class="auth-head">
-          <img src="/hie.svg" class="logo" alt="HnieOJ">
+    <main class="auth-shell">
+      <section class="auth-card setup-card">
+        <div class="auth-title">
+          <img src="/hie.svg" class="auth-logo" alt="HnieOJ">
           <div>
-            <h1>首次访问：创建本地管理员密码</h1>
-            <p>这个密码只用于当前判题机 WebUI，不会写入 HnieOJ 后端。</p>
+            <h1>第一次登录需要先设置管理员密码</h1>
+            <p>这是当前判题机 WebUI 的本地管理员密码，不是 HnieOJ 后端账号密码。</p>
           </div>
         </div>
-        <div class="guide">
-          <h2>初始化流程</h2>
+
+        <div class="setup-guide">
+          <strong>你现在要做什么？</strong>
           <ol>
-            <li>设置本地管理员密码。</li>
-            <li>登录后选择正式节点或临时节点。</li>
-            <li>填写 HnieOJ 后端、RabbitMQ 和节点参数，然后启动判题服务。</li>
+            <li>创建本机 WebUI 管理员密码。</li>
+            <li>登录控制台。</li>
+            <li>选择正式节点或临时节点，完成连接配置。</li>
           </ol>
         </div>
-        <form id="setup-form" class="form-grid">
+
+        <form id="setup-form" class="auth-form">
           <div class="field">
-            <label for="password">管理员密码</label>
+            <label for="password">新管理员密码</label>
             <input id="password" type="password" autocomplete="new-password" placeholder="至少 8 位" autofocus>
-            <span class="hint">建议使用只在本机保存的独立密码。</span>
           </div>
-          <button class="primary" type="submit">创建密码并继续</button>
+          <button class="primary wide" type="submit">设置管理员密码</button>
           <div id="message" class="message" role="status"></div>
         </form>
       </section>
+      ${noticeDialog(notice)}
     </main>`;
+  bindNoticeDialog();
   document.getElementById("setup-form").onsubmit = async (event) => {
     event.preventDefault();
     await submitWithMessage("message", async () => {
@@ -146,27 +163,29 @@ function renderSetupPassword() {
   };
 }
 
-function renderLogin() {
+function renderLogin(notice) {
   app.innerHTML = `
-    <main class="auth-page">
-      <section class="login-panel compact">
-        <div class="auth-head">
-          <img src="/hie.svg" class="logo" alt="HnieOJ">
+    <main class="auth-shell">
+      <section class="auth-card">
+        <div class="auth-title">
+          <img src="/hie.svg" class="auth-logo" alt="HnieOJ">
           <div>
-            <h1>登录 HnieOJ 判题机控制台</h1>
-            <p>登录有效期：2 小时。</p>
+            <h1>登录判题机控制台</h1>
+            <p>输入初始化时创建的本地管理员密码。登录有效期为 2 小时。</p>
           </div>
         </div>
-        <form id="login-form" class="form-grid">
+        <form id="login-form" class="auth-form">
           <div class="field">
             <label for="password">管理员密码</label>
             <input id="password" type="password" autocomplete="current-password" autofocus>
           </div>
-          <button class="primary" type="submit">登录</button>
+          <button class="primary wide" type="submit">登录</button>
           <div id="message" class="message" role="status"></div>
         </form>
       </section>
+      ${noticeDialog(notice)}
     </main>`;
+  bindNoticeDialog();
   document.getElementById("login-form").onsubmit = async (event) => {
     event.preventDefault();
     await submitWithMessage("message", async () => {
@@ -180,64 +199,71 @@ function renderLogin() {
   };
 }
 
-async function renderAuthed(path) {
+async function renderAuthed(path, notice) {
   switch (path) {
     case "/configure":
-      renderShell("configure", "配置", configureChoiceHTML());
+      renderShell("configure", "节点配置", configureChoiceHTML(), notice);
       bindConfigureChoice();
       break;
     case "/configure/formal":
-      renderShell("configure", "正式节点配置", configFormHTML("formal", await loadConfig()));
+      renderShell("configure", "正式节点配置", configFormHTML("formal", await loadConfig()), notice);
       bindConfigForm("formal");
       break;
     case "/configure/temp":
-      renderShell("configure", "临时节点配置", configFormHTML("temp", await loadConfig()));
+      renderShell("configure", "临时节点配置", configFormHTML("temp", await loadConfig()), notice);
       bindConfigForm("temp");
       break;
     case "/operations":
-      renderShell("operations", "操作", operationsHTML());
+      renderShell("operations", "运行操作", operationsHTML(), notice);
       bindOperations();
       break;
     case "/logs":
-      renderShell("logs", "日志", logsHTML());
+      renderShell("logs", "运行日志", logsHTML(), notice);
       await loadLogs();
       break;
     case "/dashboard":
     default:
-      renderShell("dashboard", "概览", dashboardHTML());
+      renderShell("dashboard", "节点概览", dashboardHTML(), notice);
       break;
   }
 }
 
-function renderShell(active, title, content) {
+function renderShell(active, title, content, notice = "") {
   app.innerHTML = `
-    <div class="console">
-      <header class="topbar">
+    <div class="app-shell">
+      <aside class="sidebar">
         <div class="brand">
           <img src="/hie.svg" alt="HnieOJ">
           <div>
             <strong>HnieOJ Judge</strong>
-            <span>本地管理控制台</span>
+            <span>本地控制台</span>
           </div>
         </div>
-        <div class="top-actions">
-          <span class="status ${stateClass(runtime.state)}">状态：${stateText(runtime.state)}</span>
-          <button id="refresh">刷新</button>
-          <button id="logout">退出</button>
+        <nav class="nav" aria-label="主导航">
+          ${navLink("/dashboard", "概览", active === "dashboard")}
+          ${navLink("/configure", "配置", active === "configure")}
+          ${navLink("/operations", "操作", active === "operations")}
+          ${navLink("/logs", "日志", active === "logs")}
+        </nav>
+        <div class="sidebar-bottom">
+          <span class="state-pill ${stateClass(runtime.state)}">${stateText(runtime.state)}</span>
+          <button id="logout" class="ghost">退出登录</button>
         </div>
-      </header>
-      <nav class="tabs" aria-label="主导航">
-        ${tab("/dashboard", "概览", active === "dashboard")}
-        ${tab("/configure", "配置", active === "configure")}
-        ${tab("/operations", "操作", active === "operations")}
-        ${tab("/logs", "日志", active === "logs")}
-      </nav>
+      </aside>
       <main class="content">
-        <h1>${escapeHTML(title)}</h1>
+        <header class="page-header">
+          <div>
+            <h1>${escapeHTML(title)}</h1>
+            <p>${escapeHTML(headerSubtitle(active))}</p>
+          </div>
+          <button id="refresh">刷新</button>
+        </header>
         ${content}
       </main>
+      ${noticeDialog(notice)}
     </div>`;
 
+  bindNoticeDialog();
   document.querySelectorAll("[data-link]").forEach((link) => {
     link.addEventListener("click", (event) => {
       event.preventDefault();
@@ -255,28 +281,23 @@ function renderShell(active, title, content) {
   };
 }
 
-function tab(path, label, active) {
+function navLink(path, label, active) {
   return `<a href="${path}" data-link class="${active ? "active" : ""}">${label}</a>`;
 }
 
 function configureChoiceHTML() {
   return `
     <section class="panel">
-      <h2>节点身份</h2>
-      <table class="info-table">
-        <tbody>
-          <tr>
-            <th>正式节点</th>
-            <td>长期运行，使用正式节点私钥完成认证。</td>
-            <td><button id="choose-formal" class="primary">配置正式节点</button></td>
-          </tr>
-          <tr>
-            <th>临时节点</th>
-            <td>临时扩容，使用后端发放的授权码兑换 JWT。</td>
-            <td><button id="choose-temp">配置临时节点</button></td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="choice-grid">
+        <button id="choose-formal" class="choice">
+          <strong>正式节点</strong>
+          <span>用于长期运行的生产判题节点。需要上传正式节点私钥。</span>
+        </button>
+        <button id="choose-temp" class="choice">
+          <strong>临时节点</strong>
+          <span>用于临时扩容。需要输入后端发放的临时授权码并兑换 JWT。</span>
+        </button>
+      </div>
     </section>`;
 }
 
@@ -288,30 +309,20 @@ function bindConfigureChoice() {
 function dashboardHTML() {
   const metrics = runtime.metrics || {};
   return `
-    <section class="panel">
-      <h2>节点状态</h2>
-      <table class="info-table">
-        <tbody>
-          ${row("运行状态", stateText(runtime.state))}
-          ${row("节点名称", runtime.nodeName || "未配置")}
-          ${row("节点类型", nodeTypeText(runtime.nodeType))}
-          ${row("运行任务", runtime.runningTasks || 0)}
-          ${row("启动时间", formatTime(runtime.startedAt))}
-          ${row("停止时间", formatTime(runtime.stoppedAt))}
-          ${row("最近错误", runtime.lastError || "无", runtime.lastError ? "error" : "ok")}
-        </tbody>
-      </table>
+    <section class="metric-grid">
+      ${metric("运行状态", stateText(runtime.state), stateClass(runtime.state))}
+      ${metric("运行任务", runtime.runningTasks || 0)}
+      ${metric("已完成", metrics.finishedTasks || 0)}
+      ${metric("失败任务", metrics.failedTasks || 0, metrics.failedTasks ? "error" : "")}
     </section>
     <section class="panel">
-      <h2>任务统计</h2>
-      <table class="info-table metrics">
-        <tbody>
-          ${row("已开始", metrics.startedTasks || 0)}
-          ${row("已完成", metrics.finishedTasks || 0)}
-          ${row("失败", metrics.failedTasks || 0, metrics.failedTasks ? "error" : "")}
-          ${row("可重试错误", metrics.retryableTasks || 0)}
-        </tbody>
-      </table>
+      <h2>节点信息</h2>
+      <div class="kv-grid">
+        ${kv("节点名称", runtime.nodeName || "未配置")}
+        ${kv("节点类型", nodeTypeText(runtime.nodeType))}
+        ${kv("启动时间", formatTime(runtime.startedAt))}
+        ${kv("最近错误", runtime.lastError || "无", runtime.lastError ? "error" : "ok")}
+      </div>
     </section>`;
 }
 
@@ -328,13 +339,11 @@ function operationsHTML() {
     </section>
     <section class="panel">
       <h2>当前状态</h2>
-      <table class="info-table">
-        <tbody>
-          ${row("状态", stateText(runtime.state))}
-          ${row("运行任务", runtime.runningTasks || 0)}
-          ${row("最近错误", runtime.lastError || "无", runtime.lastError ? "error" : "ok")}
-        </tbody>
-      </table>
+      <div class="kv-grid">
+        ${kv("状态", stateText(runtime.state))}
+        ${kv("运行任务", runtime.runningTasks || 0)}
+        ${kv("最近错误", runtime.lastError || "无", runtime.lastError ? "error" : "ok")}
+      </div>
     </section>`;
 }
 
@@ -354,9 +363,9 @@ async function runtimeAction(path) {
 function configFormHTML(mode, cfg) {
   const c = normalizedConfig(cfg);
   return `
-    <form id="config-form">
+    <form id="config-form" class="config-form">
       <section class="panel">
-        <h2>基本信息</h2>
+        <h2>基础配置</h2>
         <div class="form-grid two">
           ${field("节点名称", "node-name", c.node.name)}
           ${field("最大并发", "max-concurrency", c.node.maxConcurrency, "number")}
@@ -375,9 +384,9 @@ function configFormHTML(mode, cfg) {
           ${field("vhost", "rabbit-vhost", c.rabbitmq.virtualHost)}
         </div>
       </section>
-      ${mode === "formal" ? formalKeyHTML(c) : tempAuthHTML()}
+      ${mode === "formal" ? formalKeyHTML(c) : tempAuthHTML(c)}
       <section class="form-footer">
-        <button class="primary" type="submit">${mode === "formal" ? "保存正式节点配置" : "兑换并保存临时节点配置"}</button>
+        ${mode === "formal" ? `<button class="primary" type="submit">保存正式节点配置</button>` : tempButtonsHTML()}
         <button id="back-config" type="button">返回</button>
         <div id="config-message" class="message" role="status"></div>
       </section>
@@ -402,15 +411,28 @@ function formalKeyHTML(cfg) {
     </section>`;
 }
 
-function tempAuthHTML() {
+function tempAuthHTML(cfg) {
+  const token = cfg.hnieoj.tempToken || {};
   return `
     <section class="panel">
-      <h2>临时授权</h2>
-      <div class="field">
-        <label for="temp-auth-code">临时授权码</label>
-        <input id="temp-auth-code" type="password" placeholder="输入后会立即兑换 JWT">
+      <h2>临时授权码兑换</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label for="temp-auth-code">临时授权码</label>
+          <input id="temp-auth-code" type="password" placeholder="输入后点击下方兑换按钮">
+        </div>
+      </div>
+      <div class="token-summary">
+        ${kv("节点 ID", token.nodeId || "未兑换")}
+        ${kv("Token ID", token.tokenId || "未兑换")}
+        ${kv("过期时间", token.expireTime || "未兑换")}
       </div>
     </section>`;
+}
+
+function tempButtonsHTML() {
+  const saveButton = setup.configured ? `<button id="save-temp-config" type="button">保存基础配置</button>` : "";
+  return `${saveButton}<button id="exchange-token" class="primary" type="button">兑换临时授权码</button>`;
 }
 
 function bindConfigForm(mode) {
@@ -424,24 +446,56 @@ function bindConfigForm(mode) {
       }
     };
   }
-  document.getElementById("config-form").onsubmit = async (event) => {
-    event.preventDefault();
-    await submitWithMessage("config-message", async () => {
-      const cfg = formConfig(mode);
-      if (mode === "formal") {
+  if (mode === "formal") {
+    document.getElementById("config-form").onsubmit = async (event) => {
+      event.preventDefault();
+      await submitWithMessage("config-message", async () => {
         await api("/api/v1/setup/formal", {
           method: "POST",
-          body: JSON.stringify({ config: cfg, privateKeyPem: value("formal-private-key") }),
+          body: JSON.stringify({ config: formConfig(mode), privateKeyPem: value("formal-private-key") }),
         });
-      } else {
-        await api("/api/v1/setup/temp/exchange", {
-          method: "POST",
-          body: JSON.stringify({ config: cfg, authCode: value("temp-auth-code") }),
+        currentConfig = null;
+        navigate("/dashboard", true);
+      }, "配置已保存");
+    };
+    return;
+  }
+
+  document.getElementById("config-form").onsubmit = (event) => event.preventDefault();
+
+  const saveButton = document.getElementById("save-temp-config");
+  if (saveButton) {
+    saveButton.onclick = async () => {
+      await submitWithMessage("config-message", async () => {
+        await api("/api/v1/config", {
+          method: "PUT",
+          body: JSON.stringify(formConfig("temp")),
         });
+        currentConfig = null;
+      }, "基础配置已保存，重启判题服务后生效");
+    };
+  }
+
+  document.getElementById("exchange-token").onclick = async () => {
+    await submitWithMessage("config-message", async () => {
+      const authCode = value("temp-auth-code");
+      if (!authCode) {
+        throw new Error("请输入临时授权码");
       }
-      currentConfig = null;
-      navigate("/dashboard", true);
-    }, "配置已保存");
+      const result = await api("/api/v1/setup/temp/exchange", {
+        method: "POST",
+        body: JSON.stringify({ config: formConfig("temp"), authCode }),
+      });
+      setup.configured = true;
+      currentConfig = result.config || null;
+      await loadSetupStatus();
+      await renderAuthed("/configure/temp", "");
+      const message = document.getElementById("config-message");
+      if (message) {
+        message.textContent = "临时授权码兑换成功，JWT 已写入本机配置";
+        message.classList.add("ok");
+      }
+    });
   };
 }
 
@@ -533,8 +587,12 @@ function normalizedConfig(cfg = {}) {
   };
 }
 
-function row(label, rowValue, className = "") {
-  return `<tr><th>${escapeHTML(label)}</th><td class="${className}">${escapeHTML(String(rowValue))}</td></tr>`;
+function metric(label, metricValue, className = "") {
+  return `<article class="metric ${className}"><span>${escapeHTML(label)}</span><strong>${escapeHTML(String(metricValue))}</strong></article>`;
+}
+
+function kv(label, kvValue, className = "") {
+  return `<div class="kv"><span>${escapeHTML(label)}</span><strong class="${className}">${escapeHTML(String(kvValue))}</strong></div>`;
 }
 
 function field(label, id, fieldValue = "", type = "text", placeholder = "") {
@@ -567,6 +625,39 @@ async function submitWithMessage(messageID, action, success = "") {
       message.classList.add("error");
     }
   }
+}
+
+function noticeDialog(message) {
+  if (!message) return "";
+  return `
+    <div class="notice-backdrop">
+      <section class="notice-dialog" role="alertdialog" aria-modal="true">
+        <h2>需要先完成当前步骤</h2>
+        <p>${escapeHTML(message)}</p>
+        <button id="notice-close" class="primary">知道了</button>
+      </section>
+    </div>`;
+}
+
+function bindNoticeDialog() {
+  const close = document.getElementById("notice-close");
+  if (close) {
+    close.onclick = () => document.querySelector(".notice-backdrop")?.remove();
+  }
+}
+
+function routeLabel(path) {
+  return routeNames[path] || "控制台页面";
+}
+
+function headerSubtitle(active) {
+  const map = {
+    dashboard: "查看判题节点当前运行状态和任务统计。",
+    configure: "配置正式节点或临时节点的连接信息。",
+    operations: "启动、停止或重启容器内判题服务。",
+    logs: "查看 WebUI 记录的最近运行日志。",
+  };
+  return map[active] || "";
 }
 
 function stateText(state) {
