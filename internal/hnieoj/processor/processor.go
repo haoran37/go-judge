@@ -44,8 +44,11 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 	if task.JudgeTaskID == "" {
 		return ErrNonRetryable{Err: fmt.Errorf("judgeTaskId is required")}
 	}
+	if p.cred.Revoked() {
+		return ErrNonRetryable{Err: fmt.Errorf("judge node credential revoked")}
+	}
 	if p.cred.Expired(time.Now()) {
-		return ErrRetryable{Err: fmt.Errorf("temporary credential expired")}
+		return ErrRetryable{Err: fmt.Errorf("judge node credential expired")}
 	}
 	key := taskKey(task)
 	if _, loaded := p.inFlight.LoadOrStore(key, struct{}{}); loaded {
@@ -62,7 +65,7 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 		return err
 	}
 
-	cases, _, err := p.testdataClient.Ensure(ctx, task.ProblemID, task.DataVersion)
+	cases, _, err := p.testdataClient.Ensure(ctx, task)
 	if err != nil {
 		var permanent testdata.ErrPermanent
 		if errors.As(err, &permanent) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -53,18 +54,33 @@ func New(baseURL, cacheRoot string, httpClient *http.Client, cred Credential, lo
 	}
 }
 
-func (c *Client) Ensure(ctx context.Context, problemID, expectedVersion int64) ([]model.Case, int64, error) {
+func (c *Client) Ensure(ctx context.Context, task model.Task) ([]model.Case, int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	problemID := task.ProblemID
 	problemRoot := filepath.Join(c.cacheRoot, "problems", strconv.FormatInt(problemID, 10))
 	testdataDir := filepath.Join(problemRoot, "testdata")
 	versionFile := filepath.Join(problemRoot, "data-version")
 	localVersion := readVersion(versionFile)
 
-	reqURL := fmt.Sprintf("%s/judge/problems/%d/testdata", c.baseURL, problemID)
+	values := url.Values{}
 	if localVersion > 0 {
-		reqURL += "?version=" + strconv.FormatInt(localVersion, 10)
+		values.Set("version", strconv.FormatInt(localVersion, 10))
+	}
+	// 首次下载必须携带任务资格字段，后端会校验身份、租约与 problemId 绑定。
+	if task.SubmissionID != "" {
+		values.Set("submissionId", task.SubmissionID)
+	}
+	if task.JudgeTaskID != "" {
+		values.Set("judgeTaskId", task.JudgeTaskID)
+	}
+	if task.AttemptID != "" {
+		values.Set("attemptId", task.AttemptID)
+	}
+	reqURL := fmt.Sprintf("%s/judge/problems/%d/testdata", c.baseURL, problemID)
+	if encoded := values.Encode(); encoded != "" {
+		reqURL += "?" + encoded
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {

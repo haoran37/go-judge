@@ -1,36 +1,62 @@
+// Package auth 管理逐节点运行凭证：formal 由运维交付，temp 首次用授权码注册，
+// 运行期统一用 /judge/nodes/token/renew 稳定续期。凭证以 0600 原子写入文件。
 package auth
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/criyle/go-judge/internal/hnieoj/config"
-	"github.com/goccy/go-yaml"
+	"github.com/criyle/go-judge/internal/hnieoj/logging"
 )
 
+// maxResponseBytes 限制后端响应体大小，避免异常大响应拖垮节点。
+const maxResponseBytes = 1 << 20
+
+// DeniedError 表示后端明确拒绝访问（HTTP 401/403 或 Result.code 401/403）。
+// 这类错误不应重试，应立即停止领取与续期。
+type DeniedError struct {
+	StatusCode int
+	Code       int
+	Msg        string
+}
+
+func (e *DeniedError) Error() string {
+	if e.Msg != "" {
+		return fmt.Sprintf("backend denied request: http %d code %d: %s", e.StatusCode, e.Code, e.Msg)
+	}
+	return fmt.Sprintf("backend denied request: http %d code %d", e.StatusCode, e.Code)
+}
+
+// IsDenied 判断错误是否属于不可重试的后端拒绝。
+func IsDenied(err error) bool {
+	var denied *DeniedError
+	return errors.As(err, &denied)
+}
+
+// Credential 是线程安全的逐节点运行凭证。
 type Credential struct {
-	mu          sync.RWMutex
-	HeaderName  string
-	HeaderValue string
-	NodeID      string
-	TokenID     string
-	ExpireTime  time.Time
+	mu             sync.RWMutex
+	NodeID         string
+	TokenID        string
+	NodeType       string
+	HeaderName     string
+	HeaderValue    string
+	ExpireTime     time.Time
+	expireAtMillis int64
+	revoked        bool
 }
 
 func (c *Credential) Apply(req *http.Request) {
@@ -41,352 +67,565 @@ func (c *Credential) Apply(req *http.Request) {
 	}
 }
 
+// Expired 依据后端签发 JWT 的 exp（Unix 毫秒）判断，避免依赖节点本地时区。
 func (c *Credential) Expired(now time.Time) bool {
-	expireTime := c.ExpiresAt()
-	return !expireTime.IsZero() && !now.Before(expireTime)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.expiredLocked(now)
 }
 
-func (c *Credential) SetHeaderValue(value string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.HeaderValue = value
+func (c *Credential) expiredLocked(now time.Time) bool {
+	if c.expireAtMillis > 0 {
+		return now.UnixMilli() >= c.expireAtMillis
+	}
+	if !c.ExpireTime.IsZero() {
+		return !now.Before(c.ExpireTime)
+	}
+	return false
 }
 
 func (c *Credential) ExpiresAt() time.Time {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.expireAtMillis > 0 {
+		return time.UnixMilli(c.expireAtMillis)
+	}
 	return c.ExpireTime
 }
 
+// ExpireAtMillis 返回用于调度的绝对过期时间（毫秒）；0 表示未知。
+func (c *Credential) ExpireAtMillis() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.expireAtMillis
+}
+
+func (c *Credential) Revoked() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.revoked
+}
+
+func (c *Credential) MarkRevoked() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.revoked = true
+}
+
+// Snapshot 返回凭证的只读副本，供续期调度使用。
+func (c *Credential) Snapshot() Credential {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return Credential{
+		NodeID:         c.NodeID,
+		TokenID:        c.TokenID,
+		NodeType:       c.NodeType,
+		HeaderName:     c.HeaderName,
+		HeaderValue:    c.HeaderValue,
+		ExpireTime:     c.ExpireTime,
+		expireAtMillis: c.expireAtMillis,
+		revoked:        c.revoked,
+	}
+}
+
+// Replace 用新凭证覆盖当前凭证（续期成功后调用）。
 func (c *Credential) Replace(next *Credential) {
 	if next == nil {
 		return
 	}
 	next.mu.RLock()
-	headerName := next.HeaderName
-	headerValue := next.HeaderValue
-	nodeID := next.NodeID
-	tokenID := next.TokenID
-	expireTime := next.ExpireTime
+	snapshot := Credential{
+		NodeID:         next.NodeID,
+		TokenID:        next.TokenID,
+		NodeType:       next.NodeType,
+		HeaderName:     next.HeaderName,
+		HeaderValue:    next.HeaderValue,
+		ExpireTime:     next.ExpireTime,
+		expireAtMillis: next.expireAtMillis,
+	}
 	next.mu.RUnlock()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.HeaderName = headerName
-	c.HeaderValue = headerValue
-	c.NodeID = nodeID
-	c.TokenID = tokenID
-	c.ExpireTime = expireTime
+	c.NodeID = snapshot.NodeID
+	c.TokenID = snapshot.TokenID
+	c.NodeType = snapshot.NodeType
+	c.HeaderName = snapshot.HeaderName
+	c.HeaderValue = snapshot.HeaderValue
+	c.ExpireTime = snapshot.ExpireTime
+	c.expireAtMillis = snapshot.expireAtMillis
+	c.revoked = false
 }
 
-func Authenticate(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
-	switch cfg.Node.Type {
-	case "formal":
-		token, err := resolveFormalToken(ctx, cfg.HnieOJ.FormalToken, client)
+// storedCredential 是落盘的凭证文件格式，仅保存运行凭证，不含任何全局密钥。
+type storedCredential struct {
+	NodeID         string `json:"nodeId"`
+	TokenID        string `json:"tokenId"`
+	NodeType       string `json:"nodeType"`
+	TokenType      string `json:"tokenType"`
+	Token          string `json:"token"`
+	ExpireTime     string `json:"expireTime,omitempty"`
+	ExpireAtMillis int64  `json:"expireAtMillis,omitempty"`
+}
+
+type apiEnvelope struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data json.RawMessage `json:"data"`
+}
+
+type credentialPayload struct {
+	Token      string `json:"token"`
+	TokenType  string `json:"tokenType"`
+	NodeID     string `json:"nodeId"`
+	TokenID    string `json:"tokenId"`
+	ExpireTime string `json:"expireTime"`
+}
+
+// Manager 负责加载、持有并续期节点凭证。
+type Manager struct {
+	cfg      config.Config
+	client   *http.Client
+	logger   logging.Logger
+	filePath string
+	cred     *Credential
+}
+
+// Load 按允许的来源加载凭证：
+//  1. tokenFile 中已有的运行凭证（支持重启后继续使用最新续期凭证）；
+//  2. 内联的逐节点 token；
+//  3. temp 节点首次入网的 authCode（仅此一次）。
+func Load(ctx context.Context, cfg config.Config, client *http.Client, logger logging.Logger) (*Manager, error) {
+	m := &Manager{
+		cfg:      cfg,
+		client:   client,
+		logger:   logger,
+		filePath: strings.TrimSpace(cfg.HnieOJ.Credential.TokenFile),
+	}
+	if m.filePath != "" {
+		stored, err := readCredentialFile(m.filePath)
+		switch {
+		case err == nil && stored.Token != "":
+			m.cred = credentialFromStored(stored, cfg.Node.Type)
+			m.persistWithWarning()
+			return m, nil
+		case err != nil && !errors.Is(err, os.ErrNotExist):
+			return nil, fmt.Errorf("read credential file: %w", err)
+		}
+	}
+
+	if token := strings.TrimSpace(cfg.HnieOJ.Credential.Token); token != "" {
+		m.cred = credentialFromToken(token, cfg.Node.Type, "", "")
+		m.persistWithWarning()
+		return m, nil
+	}
+
+	if cfg.Node.Type == "temp" && strings.TrimSpace(cfg.HnieOJ.Credential.AuthCode) != "" {
+		cred, err := m.exchangeTempToken(ctx)
 		if err != nil {
 			return nil, err
 		}
-		cred := &Credential{HeaderName: "X-Judge-Token", HeaderValue: token, NodeID: cfg.Node.Name}
-		startFormalTokenRefresher(ctx, cfg.HnieOJ.FormalToken, client, cred)
-		return cred, nil
-	case "temp":
-		cred, err := resolveTempCredential(ctx, cfg, client)
-		if err != nil {
-			return nil, err
+		m.cred = cred
+		if err := m.persist(); err != nil {
+			// 首次注册后无法持久化会导致重启需要重新兑换授权码，属于配置错误，直接报错。
+			return nil, fmt.Errorf("persist first-enrollment credential: %w", err)
 		}
-		startTempTokenRefresher(ctx, cfg, client, cred)
-		return cred, nil
-	default:
-		return nil, fmt.Errorf("unsupported node type %q", cfg.Node.Type)
+		return m, nil
 	}
+
+	return nil, errors.New("no judge node credential available: provide tokenFile, token, or temp authCode")
 }
 
-func resolveFormalToken(ctx context.Context, cfg config.FormalToken, client *http.Client) (string, error) {
-	if cfg.Nacos.ServerAddr != "" && cfg.Nacos.DataID != "" && cfg.Nacos.Group != "" {
-		encryptedToken, err := fetchEncryptedTokenFromNacos(ctx, cfg, client)
-		if err == nil {
-			return decryptFormalToken(cfg, encryptedToken)
-		}
-		if isPlaceholderToken(cfg.EncryptedToken) {
-			return "", err
-		}
-	}
-
-	encryptedToken := strings.TrimSpace(cfg.EncryptedToken)
-	if isPlaceholderToken(encryptedToken) {
-		return "", errors.New("formal encrypted token is required")
-	}
-	return decryptFormalToken(cfg, encryptedToken)
+func (m *Manager) Credential() *Credential {
+	return m.cred
 }
 
-func isPlaceholderToken(value string) bool {
-	normalized := strings.TrimSpace(value)
-	return normalized == "" || normalized == "replace_me" || normalized == "{rsa}Base64CipherText"
+// StartRenewal 启动后台续期协程；所有成功/失败/取消路径都会退出，不会泄漏。
+func (m *Manager) StartRenewal(ctx context.Context) {
+	go m.renewLoop(ctx)
 }
 
-func startFormalTokenRefresher(ctx context.Context, cfg config.FormalToken, client *http.Client, cred *Credential) {
-	if cfg.Nacos.ServerAddr == "" || cfg.Nacos.DataID == "" || cfg.Nacos.Group == "" {
-		return
-	}
-	interval := cfg.RefreshInterval
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+// minRenewInterval 是到期时间未知或剩余有效期无法解析时的兜底间隔，防止紧凑自旋；
+// 正常推进式续期仍按 exp-safetyMargin 精确调度。
+const minRenewInterval = time.Second
+
+// renewShortTTLDivisor 控制短 TTL 的续期节奏：新的有效期仍落在安全余量内时，
+// 至多等待剩余有效期的 1/renewShortTTLDivisor，保证不会睡过新的过期时间。
+const renewShortTTLDivisor = 3
+
+func (m *Manager) renewLoop(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		snapshot := m.cred.Snapshot()
+		if snapshot.revoked {
+			return
+		}
+		if wait := nextRenewDelay(&snapshot, m.cfg.HnieOJ.Renew.SafetyMargin, time.Now()); wait > 0 {
+			if !sleepContext(ctx, wait) {
 				return
-			case <-ticker.C:
-				token, err := resolveFormalToken(ctx, cfg, client)
-				if err != nil {
-					continue
-				}
-				cred.SetHeaderValue(token)
 			}
+			continue
 		}
-	}()
-}
-
-func startTempTokenRefresher(ctx context.Context, cfg config.Config, client *http.Client, cred *Credential) {
-	if cfg.HnieOJ.TempToken.AuthCode == "" {
-		return
-	}
-	go func() {
-		for {
-			wait := tempRefreshDelay(cred.ExpiresAt(), time.Now())
-			if wait > 0 {
-				timer := time.NewTimer(wait)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
+		previousExpireAtMillis := snapshot.ExpireAtMillis()
+		next, err := m.renew(ctx)
+		if err != nil {
+			if IsDenied(err) {
+				m.cred.MarkRevoked()
+				m.logger.Warn("credential renewal denied, stopping node renewal", logging.Error(err))
+				return
 			}
-			next, err := exchangeTempToken(ctx, cfg, client)
-			if err != nil {
-				timer := time.NewTimer(30 * time.Second)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
-				continue
+			m.logger.Warn("credential renewal failed, will retry", logging.Error(err))
+			if !sleepContext(ctx, m.cfg.HnieOJ.Renew.RetryBackoff) {
+				return
 			}
-			cred.Replace(next)
+			continue
 		}
-	}()
-}
-
-func resolveTempCredential(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
-	if strings.TrimSpace(cfg.HnieOJ.TempToken.JWT) != "" {
-		return credentialFromTempTokenConfig(cfg.HnieOJ.TempToken)
-	}
-	return exchangeTempToken(ctx, cfg, client)
-}
-
-func credentialFromTempTokenConfig(cfg config.TempToken) (*Credential, error) {
-	token := strings.TrimSpace(cfg.JWT)
-	if token == "" {
-		return nil, errors.New("temp jwt is required")
-	}
-	tokenType := strings.TrimSpace(cfg.TokenType)
-	if tokenType == "" {
-		tokenType = "Bearer"
-	}
-	expireTime, err := parseExpireTime(cfg.ExpireTime)
-	if err != nil {
-		return nil, err
-	}
-	return &Credential{
-		HeaderName:  "Authorization",
-		HeaderValue: tokenType + " " + token,
-		NodeID:      strings.TrimSpace(cfg.NodeID),
-		TokenID:     strings.TrimSpace(cfg.TokenID),
-		ExpireTime:  expireTime,
-	}, nil
-}
-
-func tempRefreshDelay(expireTime, now time.Time) time.Duration {
-	if expireTime.IsZero() {
-		return time.Hour
-	}
-	refreshAt := expireTime.Add(-time.Minute)
-	if !refreshAt.After(now) {
-		return 0
-	}
-	return refreshAt.Sub(now)
-}
-
-func decryptFormalToken(cfg config.FormalToken, encryptedToken string) (string, error) {
-	if encryptedToken == "" {
-		return "", errors.New("formal encrypted token is required")
-	}
-	if cfg.PrivateKeyPath == "" {
-		return "", errors.New("formal private key path is required")
-	}
-	if cfg.CipherAlgorithm != "" && cfg.CipherAlgorithm != "RSA/ECB/OAEPWithSHA-256AndMGF1Padding" {
-		return "", fmt.Errorf("unsupported cipher algorithm %q", cfg.CipherAlgorithm)
-	}
-	privateKey, err := readPrivateKey(cfg.PrivateKeyPath)
-	if err != nil {
-		return "", err
-	}
-	cipherText := strings.TrimPrefix(encryptedToken, "{rsa}")
-	raw, err := base64.StdEncoding.DecodeString(cipherText)
-	if err != nil {
-		return "", err
-	}
-	plain, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, raw, nil)
-	if err != nil {
-		return "", err
-	}
-	return string(plain), nil
-}
-
-func readPrivateKey(path string) (*rsa.PrivateKey, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	block, _ := pem.Decode(b)
-	if block == nil {
-		return nil, errors.New("invalid PEM private key")
-	}
-	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		if rsaKey, ok := key.(*rsa.PrivateKey); ok {
-			return rsaKey, nil
+		m.cred.Replace(next)
+		if err := m.persist(); err != nil {
+			m.logger.Warn("credential persist failed", logging.Error(err))
 		}
-		return nil, errors.New("private key is not RSA")
+		m.logger.Info("credential renewed",
+			logging.String("nodeId", next.NodeID), logging.String("tokenId", next.TokenID))
+		if !m.rescheduleAfterRenew(ctx, previousExpireAtMillis) {
+			return
+		}
 	}
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-	return key, nil
 }
 
-type formalTokenConfigResponse struct {
-	HnieOJ struct {
-		Judge struct {
-			FormalToken struct {
-				EncryptedToken string `yaml:"encrypted-token"`
-			} `yaml:"formal-token"`
-		} `yaml:"judge"`
-	} `yaml:"hnieoj"`
+// rescheduleAfterRenew 处理续期成功后的调度：
+//   - 后端把有效期推进到安全余量之外时返回 true，由下一轮按 exp 正常调度；
+//   - 有效期仍落在安全余量内（短 TTL）时，等待剩余有效期的一小部分后再次续期，
+//     保证不会睡过新的过期时间；
+//   - temp 节点受授权期上限约束、后端无法再推进有效期时，继续续期没有意义，
+//     凭证保留到自然过期后干净退出；
+//   - 凭证已实际过期则标记撤销并停止续期。
+func (m *Manager) rescheduleAfterRenew(ctx context.Context, previousExpireAtMillis int64) bool {
+	updated := m.cred.Snapshot()
+	now := time.Now()
+	safetyMargin := m.cfg.HnieOJ.Renew.SafetyMargin
+	if safetyMargin <= 0 {
+		safetyMargin = 30 * time.Second
+	}
+	if updated.Expired(now) {
+		m.logger.Warn("credential expired and backend cannot extend it, stopping renewal",
+			logging.String("nodeId", updated.NodeID))
+		m.cred.MarkRevoked()
+		return false
+	}
+	if nextRenewDelay(&updated, safetyMargin, now) > 0 {
+		return true
+	}
+	remaining := time.Until(updated.ExpiresAt())
+	if remaining <= 0 {
+		// 到期时间未知或已到点：按正的兜底间隔重试，避免自旋。
+		return sleepContext(ctx, minRenewInterval)
+	}
+	// temp 授权期上限：后端已无法推进有效期，不再续期，保留凭证直到自然过期。
+	// 这里不标记 revoked，因为凭证在过期前仍然有效。
+	if updated.NodeType == "temp" && updated.ExpireAtMillis() > 0 && updated.ExpireAtMillis() <= previousExpireAtMillis {
+		m.logger.Info("temp credential reached authorization limit, stopping renewal at expiry",
+			logging.String("nodeId", updated.NodeID))
+		sleepContext(ctx, remaining)
+		return false
+	}
+	// 可续期的短 TTL：等待剩余有效期的一小部分，确保下次续期仍发生在过期之前。
+	if delay := remaining / renewShortTTLDivisor; delay > 0 {
+		return sleepContext(ctx, delay)
+	}
+	return sleepContext(ctx, minRenewInterval)
 }
 
-func fetchEncryptedTokenFromNacos(ctx context.Context, cfg config.FormalToken, client *http.Client) (string, error) {
-	if cfg.Nacos.ServerAddr == "" || cfg.Nacos.DataID == "" || cfg.Nacos.Group == "" {
-		return "", errors.New("formal token nacos config is required")
+// nextRenewDelay 只依据 JWT exp 决定续期时机，服务端 LocalDateTime 字符串不作为调度依据。
+func nextRenewDelay(cred *Credential, safetyMargin time.Duration, now time.Time) time.Duration {
+	if safetyMargin <= 0 {
+		safetyMargin = 30 * time.Second
 	}
-	baseURL := strings.TrimRight(cfg.Nacos.ServerAddr, "/")
-	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-		baseURL = "http://" + baseURL
+	expireAtMillis := cred.ExpireAtMillis()
+	if expireAtMillis <= 0 {
+		// exp 未知时按安全余量轮询，避免无界紧凑循环。
+		return safetyMargin
 	}
-	values := url.Values{}
-	values.Set("dataId", cfg.Nacos.DataID)
-	values.Set("group", cfg.Nacos.Group)
-	if cfg.Nacos.Namespace != "" {
-		values.Set("tenant", cfg.Nacos.Namespace)
+	renewAt := time.UnixMilli(expireAtMillis).Add(-safetyMargin)
+	if renewAt.After(now) {
+		return renewAt.Sub(now)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/nacos/v1/cs/configs?"+values.Encode(), nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("fetch formal token from nacos failed with status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	var out formalTokenConfigResponse
-	if err := yaml.Unmarshal(body, &out); err != nil {
-		return "", err
-	}
-	encryptedToken := strings.TrimSpace(out.HnieOJ.Judge.FormalToken.EncryptedToken)
-	if encryptedToken == "" {
-		return "", errors.New("formal encrypted token is empty in nacos")
-	}
-	return encryptedToken, nil
+	return 0
 }
 
-type tempTokenRequest struct {
-	AuthCode string `json:"authCode"`
-	NodeName string `json:"nodeName"`
-}
-
-type tempTokenResponse struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data struct {
-		Token      string `json:"token"`
-		TokenType  string `json:"tokenType"`
-		NodeID     string `json:"nodeId"`
-		TokenID    string `json:"tokenId"`
-		ExpireTime string `json:"expireTime"`
-	} `json:"data"`
-}
-
-func exchangeTempToken(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
-	if cfg.HnieOJ.TempToken.AuthCode == "" {
-		return nil, errors.New("temp auth code is required")
-	}
-	body, err := json.Marshal(tempTokenRequest{
-		AuthCode: cfg.HnieOJ.TempToken.AuthCode,
-		NodeName: cfg.Node.Name,
+func (m *Manager) exchangeTempToken(ctx context.Context) (*Credential, error) {
+	body, err := json.Marshal(struct {
+		AuthCode string `json:"authCode"`
+		NodeName string `json:"nodeName"`
+	}{
+		AuthCode: strings.TrimSpace(m.cfg.HnieOJ.Credential.AuthCode),
+		NodeName: m.cfg.Node.Name,
 	})
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.HnieOJ.BaseURL, "/")+"/api/judge/temp-token", bytes.NewReader(body))
+	endpoint := strings.TrimRight(m.cfg.HnieOJ.BaseURL, "/") + "/api/judge/temp-token"
+	payload, err := m.doJSON(ctx, http.MethodPost, endpoint, body, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("temp token exchange: %w", err)
+	}
+	return credentialFromPayload(payload, m.cfg.Node.Type, "", ""), nil
+}
+
+func (m *Manager) renew(ctx context.Context) (*Credential, error) {
+	snapshot := m.cred.Snapshot()
+	body := []byte("{}")
+	endpoint := strings.TrimRight(m.cfg.HnieOJ.BaseURL, "/") + "/judge/nodes/token/renew"
+	payload, err := m.doJSON(ctx, http.MethodPost, endpoint, body, &snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("token renew: %w", err)
+	}
+	// 稳定续期必须保持 nodeId/tokenId；身份漂移视为错误，禁止静默接受。
+	if snapshot.NodeID != "" && payload.NodeID != "" && payload.NodeID != snapshot.NodeID {
+		return nil, fmt.Errorf("token renew changed nodeId: %s -> %s", snapshot.NodeID, payload.NodeID)
+	}
+	if snapshot.TokenID != "" && payload.TokenID != "" && payload.TokenID != snapshot.TokenID {
+		return nil, fmt.Errorf("token renew changed tokenId: %s -> %s", snapshot.TokenID, payload.TokenID)
+	}
+	return credentialFromPayload(payload, m.cfg.Node.Type, snapshot.NodeID, snapshot.TokenID), nil
+}
+
+// doJSON 发送请求并校验 HTTP 状态与 Result.code。apply 非空时附带 Bearer 头。
+func (m *Manager) doJSON(ctx context.Context, method, endpoint string, body []byte, apply *Credential) (credentialPayload, error) {
+	var payload credentialPayload
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return payload, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
+	if apply != nil {
+		apply.Apply(req)
+	}
+	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, err
+		return payload, err
 	}
 	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return payload, err
+	}
+	if int64(len(raw)) > maxResponseBytes {
+		return payload, errors.New("backend response body too large")
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return payload, &DeniedError{StatusCode: resp.StatusCode, Msg: truncateMsg(raw)}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("temp token exchange failed with status %d", resp.StatusCode)
+		return payload, fmt.Errorf("backend returned http %d", resp.StatusCode)
 	}
-	var out tempTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+	var env apiEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return payload, fmt.Errorf("malformed backend response: %w", err)
 	}
-	if out.Code != 200 || out.Data.Token == "" {
-		return nil, fmt.Errorf("temp token exchange failed: %s", out.Msg)
+	if env.Code == http.StatusUnauthorized || env.Code == http.StatusForbidden {
+		return payload, &DeniedError{StatusCode: resp.StatusCode, Code: env.Code, Msg: env.Msg}
 	}
-	tokenType := out.Data.TokenType
+	if env.Code != http.StatusOK {
+		return payload, fmt.Errorf("backend result code %d: %s", env.Code, env.Msg)
+	}
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return payload, errors.New("backend credential response is empty")
+	}
+	if err := json.Unmarshal(env.Data, &payload); err != nil {
+		return payload, fmt.Errorf("malformed credential payload: %w", err)
+	}
+	if strings.TrimSpace(payload.Token) == "" {
+		return payload, errors.New("backend credential token is empty")
+	}
+	return payload, nil
+}
+
+func (m *Manager) persist() error {
+	if m.filePath == "" {
+		return nil
+	}
+	return writeCredentialFile(m.filePath, storedCredentialFromCredential(m.cred))
+}
+
+// persistWithWarning 在凭证已可用时，持久化失败只告警不阻塞启动。
+func (m *Manager) persistWithWarning() {
+	if err := m.persist(); err != nil {
+		m.logger.Warn("credential persist failed", logging.Error(err))
+	}
+}
+
+func storedCredentialFromCredential(cred *Credential) storedCredential {
+	snapshot := cred.Snapshot()
+	tokenType, token := splitHeaderValue(snapshot.HeaderName, snapshot.HeaderValue)
+	expireTime := ""
+	if !snapshot.ExpireTime.IsZero() {
+		expireTime = snapshot.ExpireTime.Format("2006-01-02T15:04:05")
+	}
+	return storedCredential{
+		NodeID:         snapshot.NodeID,
+		TokenID:        snapshot.TokenID,
+		NodeType:       snapshot.NodeType,
+		TokenType:      tokenType,
+		Token:          token,
+		ExpireTime:     expireTime,
+		ExpireAtMillis: snapshot.ExpireAtMillis(),
+	}
+}
+
+func readCredentialFile(path string) (storedCredential, error) {
+	var stored storedCredential
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return stored, err
+	}
+	if err := json.Unmarshal(b, &stored); err != nil {
+		return stored, err
+	}
+	return stored, nil
+}
+
+// writeCredentialFile 以 0600 权限原子替换凭证文件。
+func writeCredentialFile(path string, stored storedCredential) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".credential-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	encoder := json.NewEncoder(tmp)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(stored); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+func credentialFromStored(stored storedCredential, fallbackNodeType string) *Credential {
+	nodeType := stored.NodeType
+	if nodeType == "" {
+		nodeType = fallbackNodeType
+	}
+	return newCredential(stored.NodeID, stored.TokenID, nodeType, stored.TokenType, stored.Token,
+		stored.ExpireTime, stored.ExpireAtMillis)
+}
+
+func credentialFromToken(token, nodeType, nodeID, tokenID string) *Credential {
+	return newCredential(nodeID, tokenID, nodeType, "Bearer", token, "", 0)
+}
+
+func credentialFromPayload(payload credentialPayload, fallbackNodeType, fallbackNodeID, fallbackTokenID string) *Credential {
+	nodeID := payload.NodeID
+	if nodeID == "" {
+		nodeID = fallbackNodeID
+	}
+	tokenID := payload.TokenID
+	if tokenID == "" {
+		tokenID = fallbackTokenID
+	}
+	return newCredential(nodeID, tokenID, fallbackNodeType, payload.TokenType, payload.Token, payload.ExpireTime, 0)
+}
+
+func newCredential(nodeID, tokenID, nodeType, tokenType, token, expireTime string, expireAtMillis int64) *Credential {
 	if tokenType == "" {
 		tokenType = "Bearer"
 	}
-	expireTime, err := parseExpireTime(out.Data.ExpireTime)
-	if err != nil {
-		return nil, err
+	if expireAtMillis <= 0 {
+		expireAtMillis = jwtExpiryMillis(token)
 	}
+	parsedExpireTime, _ := parseExpireTime(expireTime)
 	return &Credential{
-		HeaderName:  "Authorization",
-		HeaderValue: tokenType + " " + out.Data.Token,
-		NodeID:      out.Data.NodeID,
-		TokenID:     out.Data.TokenID,
-		ExpireTime:  expireTime,
-	}, nil
+		NodeID:         strings.TrimSpace(nodeID),
+		TokenID:        strings.TrimSpace(tokenID),
+		NodeType:       strings.TrimSpace(nodeType),
+		HeaderName:     "Authorization",
+		HeaderValue:    tokenType + " " + token,
+		ExpireTime:     parsedExpireTime,
+		expireAtMillis: expireAtMillis,
+	}
+}
+
+// splitHeaderValue 从 "Bearer xxx" 还原 tokenType 与 token。
+func splitHeaderValue(headerName, headerValue string) (string, string) {
+	if headerName != "Authorization" {
+		return "", headerValue
+	}
+	parts := strings.SplitN(strings.TrimSpace(headerValue), " ", 2)
+	if len(parts) != 2 {
+		return "Bearer", headerValue
+	}
+	return parts[0], parts[1]
+}
+
+// jwtExpiryMillis 只解码 JWT payload 的 exp 供本地调度使用。
+// 服务端验签仍是唯一权威；这里不校验签名，也绝不用它做授权判断。
+func jwtExpiryMillis(token string) int64 {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
+		return 0
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if raw, err = base64.StdEncoding.DecodeString(parts[1]); err != nil {
+			return 0
+		}
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		return 0
+	}
+	return normalizeEpoch(claims["exp"])
+}
+
+func normalizeEpoch(value any) int64 {
+	var epoch int64
+	switch v := value.(type) {
+	case float64:
+		epoch = int64(v)
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil {
+			return 0
+		}
+		epoch = parsed
+	case string:
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0
+		}
+		epoch = parsed
+	default:
+		return 0
+	}
+	if epoch <= 0 {
+		return 0
+	}
+	// 后端 JWT 使用 Unix 毫秒；兼容以秒为单位的签发实现。
+	if epoch < 1_000_000_000_000 {
+		return epoch * 1000
+	}
+	return epoch
 }
 
 func parseExpireTime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}, nil
 	}
@@ -394,4 +633,26 @@ func parseExpireTime(s string) (time.Time, error) {
 		return t, nil
 	}
 	return time.ParseInLocation("2006-01-02T15:04:05", s, time.Local)
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func truncateMsg(raw []byte) string {
+	msg := strings.TrimSpace(string(raw))
+	if len(msg) > 256 {
+		return msg[:256]
+	}
+	return msg
 }

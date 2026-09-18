@@ -1,79 +1,41 @@
-# HnieOJ 判题节点示例配置。
-# 部署时建议复制为实际运行配置后再修改，不要直接提交真实密码、授权码或私钥。
+# HnieOJ 判题节点示例配置（轻量化：后端 HTTPS 网关 + 逐节点 Bearer，无 RabbitMQ/Nacos）。
+# 部署时建议复制为实际运行配置后再修改，不要直接提交真实授权码、运行凭证或私钥。
 
 node:
   # 判题节点名称。建议全局唯一，便于后端心跳、日志和运维定位。
   name: judge-node-01
   # 节点类型：formal 表示正式长期节点；temp 表示临时节点。
+  # formal 与 temp 在运行期都只使用逐节点 Bearer 凭证，不再使用共享主密钥。
   type: formal
-  # 本节点同时处理的最大判题任务数。通常不应超过机器可承载的并发沙箱数量。
+  # 本节点同时处理的最大判题任务数。后端会核准额度，节点上报不能提高该额度。
   maxConcurrency: 4
   # 节点声明支持的判题模式。默认只开放 default；确认后端和题目协议闭环后再开启 spj/interactive。
   supportedJudgeModes:
     - default
 
-remoteConfig:
-  # 是否从 Nacos 拉取非敏感运行参数。敏感信息仍建议放在本地配置或环境变量中。
-  enabled: false
-  nacos:
-    serverAddr: "http://127.0.0.1:8848"
-    namespace: "dev"
-    group: "HNIEOJ_JUDGE_GROUP"
-    dataId: "hnieoj-judge-node.yaml"
-
 hnieoj:
-  # HnieOJ 后端服务地址，节点会访问认证、测试数据、事件上报和心跳接口。
+  # HnieOJ 后端网关地址。远程后端必须使用 HTTPS；仅显式回环地址（localhost/127.0.0.1/::1）
+  # 允许明文 HTTP 用于本地开发。节点不跳过证书校验，也没有 skip-cert 开关。
   baseUrl: "https://oj.example.com"
   # 节点访问后端接口的 HTTP 超时时间。
   requestTimeout: "30s"
 
-  formalToken:
-    # formal 节点私钥路径。容器内路径通常由部署脚本挂载到该位置。
-    privateKeyPath: "/etc/hnieoj/judge-security/judge_formal_private.pem"
-    # formal token 解密算法。当前后端/节点约定为 RSA OAEP SHA-256。
-    cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
-    # formal 节点轮询 Nacos token 密文的间隔。
-    refreshInterval: "30s"
-    nacos:
-      serverAddr: "http://127.0.0.1:8848"
-      namespace: "dev"
-      group: "HNIEOJ_SECRET_GROUP"
-      dataId: "hnieoj-judge-formal-token.yaml"
-
-  tempToken:
-    # temp 节点授权码。部署脚本会先用它兑换 JWT，成功后再启动容器。
+  credential:
+    # 逐节点运行凭证文件。formal 由运维预置；temp 首次兑换成功后节点会自动写入。
+    # 文件仅保存运行凭证，不含任何全局密钥；续期后以 0600 权限原子替换，重启优先读取。
+    tokenFile: "/etc/hnieoj/judge-node/credential.json"
+    # 也可直接内联逐节点 Bearer JWT（留空则只使用 tokenFile）。该值不会写入日志。
+    token: ""
+    # temp 节点首次接入授权码，仅在首次注册时使用；之后只通过 /judge/nodes/token/renew 续期。
+    # formal 节点必须留空。
     authCode: ""
-    # 部署脚本预兑换得到的 JWT。容器启动时优先使用该值作为首次凭证。
-    jwt: ""
-    # JWT 类型，通常为 Bearer。
-    tokenType: ""
-    # 后端返回的临时节点 ID。
-    nodeId: ""
-    # 后端返回的临时 token ID。
-    tokenId: ""
-    # JWT 过期时间。节点会在过期前使用 authCode 刷新。
-    expireTime: ""
 
-rabbitmq:
-  # RabbitMQ 连接配置。
-  host: "127.0.0.1"
-  port: 5672
-  username: "guest"
-  password: "replace_me"
-  virtualHost: "/"
-  # 判题任务交换机、队列、路由键。
-  exchange: "hnieoj.judge.exchange"
-  queue: "hnieoj.judge.task"
-  routingKey: "judge.submission.created"
-  # 死信队列配置。超过最大重试次数后进入 DLQ。
-  deadLetterExchange: "hnieoj.judge.dlx"
-  deadLetterQueue: "hnieoj.judge.task.dlq"
-  deadLetterRoutingKey: "judge.submission.created.dlq"
-  # RabbitMQ 预取数量。通常与 node.maxConcurrency 保持一致。
-  prefetch: 4
-  # 可重试错误的最大重试次数和重试退避。
-  maxRetries: 3
-  retryBackoff: "10s"
+  renew:
+    # 相对后端签发 JWT exp（Unix 毫秒）的提前续期量，节点不依赖本地时区推断过期时间。
+    # 若后端签发的 TTL 小于该余量，节点按剩余有效期的一小部分及时续期，不会睡过新的过期时间。
+    safetyMargin: "30s"
+    # 运行凭证续期网络失败后的重试退避。
+    retryBackoff: "10s"
 
 testdata:
   # 测试数据缓存目录。部署脚本会挂载宿主机持久化目录到这里。
@@ -89,14 +51,18 @@ testdata:
 
 gojudge:
   # go-judge sandbox 地址。容器部署时通常为 http://go-judge-sandbox:5050。
+  # sandbox 属于本地/内网端点，可继续使用 HTTP，与后端 HTTPS 要求相互独立。
   endpoint: "http://127.0.0.1:5050"
   # 如果 sandbox 开启了 -auth-token，这里填写对应 token；默认留空。
   authToken: ""
 
 reporter:
-  # 事件上报模式：http 表示上报后端；log/mock 适合本地调试。
+  # 事件上报模式：http 表示上报后端；log 仅适合本地调试/fixture。
   mode: "http"
   endpoint: "/judge/submissions/{submissionId}/events"
+  # 仅对网络失败和 HTTP 5xx 做有限重试；HTTP 200 但 Result.code != 200 立即失败。
+  maxRetries: 3
+  retryBackoff: "2s"
 
 heartbeat:
   # 是否开启节点心跳。生产环境建议开启。
@@ -104,3 +70,10 @@ heartbeat:
   endpoint: "/judge/nodes/heartbeat"
   # 生产环境建议保持 30 秒左右，不要调到 1 秒级别。
   interval: "30s"
+
+worker:
+  # 空队列退避区间（有上限，实际等待在区间内抖动）。每个槽位一次只领取一个任务。
+  emptyMinBackoff: "200ms"
+  emptyMaxBackoff: "5s"
+  # SIGTERM 后停止领取新任务，但在该窗口内排空在途任务并继续续租；超时会取消任务。
+  drainTimeout: "5m"

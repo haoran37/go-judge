@@ -1,52 +1,91 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/goccy/go-yaml"
 )
 
-func TestMergeRemoteConfig(t *testing.T) {
-	body := []byte(`
-node:
-  maxConcurrency: 3
-  supportedJudgeModes: ["default", "spj"]
-rabbitmq:
-  prefetch: 3
-  maxRetries: 5
-  retryBackoff: "15s"
-testdata:
-  maxCacheBytes: 1024
-  maxUnusedDuration: "24h"
-  cleanupInterval: "30m"
-  statsInterval: "2m"
-heartbeat:
-  enabled: true
-  interval: "20s"
-`)
-	var overlay remoteConfigOverlay
-	if err := yaml.Unmarshal(body, &overlay); err != nil {
-		t.Fatalf("unmarshal remote config: %v", err)
+func TestValidateBackendURLRejectsRemotePlaintext(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantErr bool
+	}{
+		{"https://oj.example.com", false},
+		{"https://oj.example.com:8443/api", false},
+		{"http://localhost:8800", false},
+		{"http://127.0.0.1:8800", false},
+		{"http://[::1]:8800", false},
+		{"http://10.0.0.5:8800", true},
+		{"http://oj.example.com", true},
+		{"ftp://oj.example.com", true},
+		{"oj.example.com", true},
 	}
-	cfg := defaultConfig()
-	mergeRemoteConfig(cfg, overlay)
+	for _, tc := range cases {
+		err := ValidateBackendURL(tc.raw)
+		if tc.wantErr && err == nil {
+			t.Fatalf("ValidateBackendURL(%q) = nil, want error", tc.raw)
+		}
+		if !tc.wantErr && err != nil {
+			t.Fatalf("ValidateBackendURL(%q) error: %v", tc.raw, err)
+		}
+	}
+}
 
-	if cfg.Node.MaxConcurrency != 3 {
-		t.Fatalf("unexpected maxConcurrency: %d", cfg.Node.MaxConcurrency)
+func TestValidateRejectsPlaintextRemoteBackend(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.HnieOJ.BaseURL = "http://10.0.0.9:8800"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("expected https requirement error, got %v", err)
 	}
-	if cfg.RabbitMQ.Prefetch != 3 || cfg.RabbitMQ.MaxRetries != 5 || cfg.RabbitMQ.RetryBackoff != 15*time.Second {
-		t.Fatalf("unexpected rabbitmq config: %+v", cfg.RabbitMQ)
+}
+
+func TestValidateDefaultsWorkerAndReporter(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.HnieOJ.BaseURL = "https://oj.example.com"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
 	}
-	if cfg.Testdata.MaxCacheBytes != 1024 || cfg.Testdata.MaxUnusedDuration != 24*time.Hour ||
-		cfg.Testdata.CleanupInterval != 30*time.Minute || cfg.Testdata.StatsInterval != 2*time.Minute {
-		t.Fatalf("unexpected testdata config: %+v", cfg.Testdata)
+	if cfg.Worker.EmptyMinBackoff != 200*time.Millisecond || cfg.Worker.EmptyMaxBackoff != 5*time.Second {
+		t.Fatalf("unexpected worker backoff: %+v", cfg.Worker)
 	}
-	if !cfg.Heartbeat.Enabled || cfg.Heartbeat.Interval != 20*time.Second {
-		t.Fatalf("unexpected heartbeat config: %+v", cfg.Heartbeat)
+	if cfg.Worker.DrainTimeout != 5*time.Minute {
+		t.Fatalf("unexpected drain timeout: %v", cfg.Worker.DrainTimeout)
 	}
-	if len(cfg.Node.SupportedJudgeModes) != 2 || cfg.Node.SupportedJudgeModes[1] != "spj" {
-		t.Fatalf("unexpected supported judge modes: %#v", cfg.Node.SupportedJudgeModes)
+	if cfg.Reporter.MaxRetries != 3 || cfg.Reporter.RetryBackoff != 2*time.Second {
+		t.Fatalf("unexpected reporter retry config: %+v", cfg.Reporter)
+	}
+}
+
+func TestValidateRequiresTempAuthCodeOrCredential(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Node.Type = "temp"
+	cfg.HnieOJ.BaseURL = "https://oj.example.com"
+	cfg.HnieOJ.Credential.TokenFile = ""
+	cfg.HnieOJ.Credential.Token = ""
+	cfg.HnieOJ.Credential.AuthCode = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected credential requirement error for temp node without credential")
+	}
+	cfg.HnieOJ.Credential.AuthCode = "code"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("temp node with authCode should validate: %v", err)
+	}
+}
+
+func TestExampleConfigsLoad(t *testing.T) {
+	for _, path := range []string{
+		"../../../config.example.yaml",
+		"../../../deploy/config.formal.example.yaml",
+		"../../../deploy/config.temp.example.yaml",
+	} {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%s) error: %v", path, err)
+		}
+		if cfg.Node.MaxConcurrency <= 0 || len(cfg.Node.SupportedJudgeModes) == 0 {
+			t.Fatalf("Load(%s) produced incomplete config: %+v", path, cfg.Node)
+		}
 	}
 }
 

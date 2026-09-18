@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,9 +19,11 @@ import (
 	"github.com/criyle/go-judge/internal/hnieoj/logging"
 )
 
-const Version = "hnieoj-go-judge-0.1.0"
+const Version = "hnieoj-go-judge-0.2.0"
 
 const defaultCacheStatsInterval = 5 * time.Minute
+
+const maxResponseBytes = 1 << 20
 
 type Client struct {
 	cfg          config.Config
@@ -27,6 +31,7 @@ type Client struct {
 	httpClient   *http.Client
 	logger       logging.Logger
 	running      *atomic.Int64
+	draining     *atomic.Bool
 	cacheMu      sync.Mutex
 	cacheStats   CacheStats
 	cacheStatsAt time.Time
@@ -41,14 +46,18 @@ type Payload struct {
 	CPUCore             int      `json:"cpuCore"`
 	Version             string   `json:"version"`
 	SupportedJudgeModes []string `json:"supportedJudgeModes"`
+	Draining            bool     `json:"draining"`
 	CacheUsedBytes      int64    `json:"cacheUsedBytes"`
 	CacheProblemCount   int      `json:"cacheProblemCount"`
 	DiskTotalBytes      int64    `json:"diskTotalBytes"`
 	DiskFreeBytes       int64    `json:"diskFreeBytes"`
 }
 
-func New(cfg config.Config, cred *auth.Credential, httpClient *http.Client, logger logging.Logger, running *atomic.Int64) *Client {
-	return &Client{cfg: cfg, cred: cred, httpClient: httpClient, logger: logger, running: running}
+func New(cfg config.Config, cred *auth.Credential, httpClient *http.Client, logger logging.Logger, running *atomic.Int64, draining *atomic.Bool) *Client {
+	if draining == nil {
+		draining = &atomic.Bool{}
+	}
+	return &Client{cfg: cfg, cred: cred, httpClient: httpClient, logger: logger, running: running, draining: draining}
 }
 
 func (c *Client) Start(ctx context.Context) {
@@ -76,7 +85,9 @@ func (c *Client) Start(ctx context.Context) {
 }
 
 func (c *Client) Send(ctx context.Context) error {
-	nodeID := c.cred.NodeID
+	// 通过 Snapshot 读取凭证，避免与后台续期的 Replace 并发读写。
+	cred := c.cred.Snapshot()
+	nodeID := cred.NodeID
 	if nodeID == "" {
 		nodeID = c.cfg.Node.Name
 	}
@@ -90,6 +101,7 @@ func (c *Client) Send(ctx context.Context) error {
 		CPUCore:             runtime.NumCPU(),
 		Version:             Version,
 		SupportedJudgeModes: c.cfg.Node.SupportedJudgeModes,
+		Draining:            c.draining.Load(),
 		CacheUsedBytes:      cacheStats.CacheUsedBytes,
 		CacheProblemCount:   cacheStats.CacheProblemCount,
 		DiskTotalBytes:      cacheStats.DiskTotalBytes,
@@ -113,8 +125,25 @@ func (c *Client) Send(ctx context.Context) error {
 		return err
 	}
 	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(raw)) > maxResponseBytes {
+		return errHeartbeatResponseTooLarge
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &statusError{code: resp.StatusCode}
+	}
+	var envelope struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return errMalformedHeartbeatResponse
+	}
+	if envelope.Code != http.StatusOK {
+		return &statusError{code: envelope.Code}
 	}
 	c.logger.Info("heartbeat succeeded")
 	return nil
@@ -135,10 +164,15 @@ func (c *Client) cacheStatsSnapshot() CacheStats {
 	return c.cacheStats
 }
 
+var (
+	errHeartbeatResponseTooLarge  = errors.New("heartbeat response body too large")
+	errMalformedHeartbeatResponse = errors.New("malformed heartbeat response")
+)
+
 type statusError struct {
 	code int
 }
 
 func (e *statusError) Error() string {
-	return "heartbeat status " + strconv.Itoa(e.code)
+	return fmt.Sprintf("heartbeat status %d", e.code)
 }

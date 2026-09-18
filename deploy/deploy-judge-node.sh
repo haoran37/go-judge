@@ -7,11 +7,11 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 IMAGE="${IMAGE:-${IMAGE_REPOSITORY}:${IMAGE_TAG}}"
 PROJECT_NAME="${PROJECT_NAME:-hnieoj-judge-node}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/hnieoj/go-judge}"
-SECURITY_DIR="${SECURITY_DIR:-/etc/hnieoj/judge-security}"
+CREDENTIAL_DIR="${CREDENTIAL_DIR:-/etc/hnieoj/judge-node}"
+CREDENTIAL_FILE="${CREDENTIAL_FILE:-${CREDENTIAL_DIR}/credential.json}"
 CACHE_DIR="${CACHE_DIR:-/data/oj/judge-cache}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.yaml}"
 COMPOSE_FILE="${COMPOSE_FILE:-${CONFIG_DIR}/compose.yaml}"
-PRIVATE_KEY_FILE="${PRIVATE_KEY_FILE:-${SECURITY_DIR}/judge_formal_private.pem}"
 
 GOJUDGE_SHM_SIZE="${GOJUDGE_SHM_SIZE:-512m}"
 GOJUDGE_FILE_TIMEOUT="${GOJUDGE_FILE_TIMEOUT:-30m}"
@@ -56,10 +56,10 @@ check_default_path_permissions() {
   if [[ "${EUID}" -eq 0 ]]; then
     return
   fi
-  for path in "${CONFIG_DIR}" "${SECURITY_DIR}" "${CACHE_DIR}"; do
+  for path in "${CONFIG_DIR}" "${CREDENTIAL_DIR}" "${CACHE_DIR}"; do
     case "${path}" in
       /etc/*|/data/*|/var/*)
-        fail "默认部署目录 ${path} 需要 root 权限；请使用 sudo 执行，或通过 CONFIG_DIR/SECURITY_DIR/CACHE_DIR 指定其他目录"
+        fail "默认部署目录 ${path} 需要 root 权限；请使用 sudo 执行，或通过 CONFIG_DIR/CREDENTIAL_DIR/CACHE_DIR 指定其他目录"
         ;;
     esac
   done
@@ -98,20 +98,6 @@ prompt() {
   else
     printf '%s' "${value}"
   fi
-}
-
-prompt_required() {
-  local label="$1"
-  local value
-  while true; do
-    printf '%s: ' "${label}" >&2
-    read_line value
-    if [[ -n "${value}" ]]; then
-      printf '%s' "${value}"
-      return
-    fi
-    warn "该项不能为空"
-  done
 }
 
 prompt_secret_required() {
@@ -162,21 +148,6 @@ yaml_quote() {
   printf '"%s"' "${value}"
 }
 
-json_quote() {
-  local value="${1:-}"
-  [[ "${value}" != *$'\n'* ]] || fail "JSON 字段不能包含换行"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '"%s"' "${value}"
-}
-
-validate_node_type() {
-  case "$1" in
-    formal|temp) return 0 ;;
-    *) fail "不支持的节点类型：$1" ;;
-  esac
-}
-
 array_contains() {
   local needle="$1"
   local item
@@ -220,8 +191,8 @@ write_modes_yaml() {
 }
 
 prepare_dirs() {
-  mkdir -p "${CONFIG_DIR}" "${SECURITY_DIR}" "${CACHE_DIR}"
-  chmod 700 "${CONFIG_DIR}" "${SECURITY_DIR}" 2>/dev/null || true
+  mkdir -p "${CONFIG_DIR}" "${CREDENTIAL_DIR}" "${CACHE_DIR}"
+  chmod 700 "${CONFIG_DIR}" "${CREDENTIAL_DIR}" 2>/dev/null || true
   chmod 755 "${CACHE_DIR}" 2>/dev/null || true
 }
 
@@ -236,97 +207,14 @@ preflight() {
   prepare_dirs
 }
 
-parse_temp_token_response() {
-  local response_file="$1"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "${response_file}" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    payload = json.load(f)
-
-code = payload.get("code")
-data = payload.get("data") or {}
-token = data.get("token") or ""
-if code != 200 or not token:
-    msg = payload.get("msg") or "空 token"
-    raise SystemExit(f"临时令牌兑换失败：{msg}")
-
-values = [
-    token,
-    data.get("tokenType") or "Bearer",
-    data.get("nodeId") or "",
-    data.get("tokenId") or "",
-    data.get("expireTime") or "",
-]
-print("\t".join(values))
-PY
-    return
-  fi
-
-  if command -v jq >/dev/null 2>&1; then
-    jq -r '
-      if (.code != 200 or ((.data.token // "") == "")) then
-        error("临时令牌兑换失败：" + (.msg // "空 token"))
-      else
-        [
-          .data.token,
-          (.data.tokenType // "Bearer"),
-          (.data.nodeId // ""),
-          (.data.tokenId // ""),
-          (.data.expireTime // "")
-        ] | @tsv
-      end
-    ' "${response_file}"
-    return
-  fi
-
-  fail "临时令牌兑换需要 python3 或 jq 来解析后端 JSON 响应"
-}
-
-exchange_temp_token() {
-  local backend_url="$1"
-  local node_name="$2"
-  local auth_code="$3"
-  local endpoint="${backend_url%/}/api/judge/temp-token"
-  local request_body
-  local response_file
-  local http_code
-  local parsed
-
-  require_command curl
-  request_body='{"authCode":'"$(json_quote "${auth_code}")"',"nodeName":'"$(json_quote "${node_name}")"'}'
-  response_file="$(mktemp "${CONFIG_DIR}/temp-token-response.XXXXXX")"
-
-  if ! http_code="$(curl -sS --connect-timeout 10 --max-time 30 \
-    -o "${response_file}" \
-    -w '%{http_code}' \
-    -H 'Content-Type: application/json' \
-    -X POST \
-    --data "${request_body}" \
-    "${endpoint}")"; then
-    rm -f "${response_file}"
-    warn "请求 ${endpoint} 失败"
-    return 1
-  fi
-
-  if [[ ! "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
-    warn "临时令牌兑换返回 HTTP ${http_code}: $(tr -d '\r\n' < "${response_file}")"
-    rm -f "${response_file}"
-    return 1
-  fi
-
-  if ! parsed="$(parse_temp_token_response "${response_file}")"; then
-    rm -f "${response_file}"
-    return 1
-  fi
-  rm -f "${response_file}"
-
-  IFS=$'\t' read -r TEMP_JWT TEMP_TOKEN_TYPE TEMP_NODE_ID TEMP_TOKEN_ID TEMP_EXPIRE_TIME <<< "${parsed}"
-  [[ -n "${TEMP_JWT}" ]] || return 1
-  log "临时令牌兑换成功，JWT 过期时间：${TEMP_EXPIRE_TIME:-未知}"
+write_credential_file() {
+  local content="$1"
+  local tmp_file
+  tmp_file="$(mktemp "${CREDENTIAL_DIR}/credential.json.tmp.XXXXXX")"
+  printf '%s\n' "${content}" > "${tmp_file}"
+  chmod 600 "${tmp_file}" 2>/dev/null || true
+  mv "${tmp_file}" "${CREDENTIAL_FILE}"
+  log "已写入逐节点运行凭证：${CREDENTIAL_FILE}"
 }
 
 write_config_file() {
@@ -335,22 +223,7 @@ write_config_file() {
   local max_concurrency="$3"
   local supported_modes="$4"
   local backend_url="$5"
-  local rabbit_host="$6"
-  local rabbit_port="$7"
-  local rabbit_username="$8"
-  local rabbit_password="$9"
-  local rabbit_vhost="${10}"
-  local auth_code="${11}"
-  local temp_jwt="${12}"
-  local temp_token_type="${13}"
-  local temp_node_id="${14}"
-  local temp_token_id="${15}"
-  local temp_expire_time="${16}"
-  local nacos_server="${17}"
-  local nacos_namespace="${18}"
-  local remote_enabled="${19}"
-  local formal_token_group="${20}"
-  local formal_token_data_id="${21}"
+  local auth_code="$6"
 
   local tmp_file
   tmp_file="$(mktemp "${CONFIG_DIR}/config.yaml.tmp.XXXXXX")"
@@ -358,14 +231,15 @@ write_config_file() {
   {
     cat <<EOF
 # HnieOJ 判题节点运行配置。
-# 由 deploy/deploy-judge-node.sh 生成。真实密码、授权码和私钥不要提交到仓库。
+# 由 deploy/deploy-judge-node.sh 生成。节点运行期只访问后端 HTTPS 网关和本地沙箱，
+# 不依赖 RabbitMQ/Nacos/Redis。真实授权码与运行凭证不要提交到仓库。
 
 node:
   # 节点名称，建议全局唯一。
   name: $(yaml_quote "${node_name}")
   # 节点类型：formal 为正式长期节点，temp 为临时节点。
   type: $(yaml_quote "${node_type}")
-  # 最大并发判题任务数。
+  # 最大并发判题任务数。后端以核准额度为准。
   maxConcurrency: ${max_concurrency}
   # 本节点支持的判题模式。确认后端和题目协议闭环后再开启 spj/interactive。
   supportedJudgeModes:
@@ -373,63 +247,23 @@ EOF
     write_modes_yaml "${supported_modes}"
     cat <<EOF
 
-remoteConfig:
-  # 是否从 Nacos 加载非敏感运行参数。
-  enabled: ${remote_enabled}
-  nacos:
-    serverAddr: $(yaml_quote "${nacos_server}")
-    namespace: $(yaml_quote "${nacos_namespace}")
-    group: "HNIEOJ_JUDGE_GROUP"
-    dataId: "hnieoj-judge-node.yaml"
-
 hnieoj:
-  # HnieOJ 后端服务地址。
+  # HnieOJ 后端网关地址。远程必须 HTTPS；仅回环地址允许明文 HTTP 供本地开发。
   baseUrl: $(yaml_quote "${backend_url}")
-  # 节点访问后端接口的超时时间。
+  # 后端接口 HTTP 超时。
   requestTimeout: "30s"
-  formalToken:
-    # formal 节点私钥路径。容器内路径由部署脚本挂载。
-    privateKeyPath: $(yaml_quote "${PRIVATE_KEY_FILE}")
-    cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
-    # formal token 密文刷新间隔。
-    refreshInterval: "30s"
-    nacos:
-      serverAddr: $(yaml_quote "${nacos_server}")
-      namespace: $(yaml_quote "${nacos_namespace}")
-      group: $(yaml_quote "${formal_token_group}")
-      dataId: $(yaml_quote "${formal_token_data_id}")
-  tempToken:
-    # temp 节点授权码。脚本会先用它兑换 JWT，成功后再启动容器。
+  credential:
+    # 逐节点运行凭证文件。formal 由运维交付；temp 首次注册后自动写入；续期后原子替换（0600）。
+    tokenFile: $(yaml_quote "${CREDENTIAL_FILE}")
+    # 也可内联逐节点 Bearer JWT；留空只使用凭证文件。不要提交真实值。
+    token: ""
+    # temp 首次接入授权码，仅首次注册使用；formal 必须留空。
     authCode: $(yaml_quote "${auth_code}")
-    # 预兑换得到的 JWT。容器启动时优先使用该值作为首次凭证。
-    jwt: $(yaml_quote "${temp_jwt}")
-    # JWT 类型，通常为 Bearer。
-    tokenType: $(yaml_quote "${temp_token_type}")
-    # 后端返回的临时节点 ID。
-    nodeId: $(yaml_quote "${temp_node_id}")
-    # 后端返回的临时 token ID。
-    tokenId: $(yaml_quote "${temp_token_id}")
-    # JWT 过期时间。节点会在过期前使用 authCode 刷新。
-    expireTime: $(yaml_quote "${temp_expire_time}")
-
-rabbitmq:
-  # RabbitMQ 连接和判题任务队列配置。
-  host: $(yaml_quote "${rabbit_host}")
-  port: ${rabbit_port}
-  username: $(yaml_quote "${rabbit_username}")
-  password: $(yaml_quote "${rabbit_password}")
-  virtualHost: $(yaml_quote "${rabbit_vhost}")
-  exchange: "hnieoj.judge.exchange"
-  queue: "hnieoj.judge.task"
-  routingKey: "judge.submission.created"
-  deadLetterExchange: "hnieoj.judge.dlx"
-  deadLetterQueue: "hnieoj.judge.task.dlq"
-  deadLetterRoutingKey: "judge.submission.created.dlq"
-  # 预取数量通常与 maxConcurrency 保持一致。
-  prefetch: ${max_concurrency}
-  # 可重试错误的最大重试次数和退避间隔。
-  maxRetries: 3
-  retryBackoff: "10s"
+  renew:
+    # 依后端 JWT exp 提前续期的安全余量。
+    safetyMargin: "30s"
+    # 续期网络失败重试退避。
+    retryBackoff: "10s"
 
 testdata:
   # 测试数据缓存目录。
@@ -444,21 +278,30 @@ testdata:
   statsInterval: "5m"
 
 gojudge:
-  # go-judge sandbox 服务地址。
+  # go-judge sandbox 服务地址（本地/内网 HTTP）。
   endpoint: "http://go-judge-sandbox:5050"
-  # 如果 sandbox 开启 -auth-token，则填写对应 token。
   authToken: ""
 
 reporter:
-  # http 表示上报后端；log/mock 适合本地调试。
+  # http 上报后端；log 仅用于本地调试/fixture。
   mode: "http"
   endpoint: "/judge/submissions/{submissionId}/events"
+  # 仅对网络失败/5xx 有限重试；HTTP200 但 Result.code != 200 立即失败。
+  maxRetries: 3
+  retryBackoff: "2s"
 
 heartbeat:
   # 生产环境建议开启心跳，间隔不要设置为 1 秒级别。
   enabled: true
   endpoint: "/judge/nodes/heartbeat"
   interval: "30s"
+
+worker:
+  # 空队列退避（有上限 + 抖动）。
+  emptyMinBackoff: "200ms"
+  emptyMaxBackoff: "5s"
+  # SIGTERM 后停止领取并在该窗口内排空在途任务，超时取消。
+  drainTimeout: "5m"
 EOF
   } > "${tmp_file}"
 
@@ -490,69 +333,38 @@ init_config() {
   local max_concurrency
   local supported_modes
   local backend_url
-  local rabbit_host
-  local rabbit_port
-  local rabbit_username
-  local rabbit_password
-  local rabbit_vhost
-  local temp_jwt=""
-  local temp_token_type=""
-  local temp_node_id=""
-  local temp_token_id=""
-  local temp_expire_time=""
-  local nacos_server=""
-  local nacos_namespace=""
   local auth_code=""
-  local remote_enabled="false"
-  local formal_token_group=""
-  local formal_token_data_id=""
 
   node_name="$(prompt "节点名称" "judge-node-01")"
   max_concurrency="$(prompt_positive_int "最大并发判题任务数" "2")"
   supported_modes="$(normalize_modes_csv "$(prompt "支持的判题模式" "default")")"
-  backend_url="$(prompt "HnieOJ 后端基础地址" "http://127.0.0.1:8800")"
-  rabbit_host="$(prompt "RabbitMQ 主机" "127.0.0.1")"
-  rabbit_port="$(prompt_positive_int "RabbitMQ 端口" "5672")"
-  rabbit_username="$(prompt "RabbitMQ 用户名" "hnieoj_judge")"
-  rabbit_password="$(prompt_secret_required "RabbitMQ 密码")"
-  rabbit_vhost="$(prompt "RabbitMQ 虚拟主机" "hnieoj")"
+  backend_url="$(prompt "HnieOJ 后端网关地址（远程必须 https）" "https://oj.example.com")"
 
   if [[ "${node_type}" == "formal" ]]; then
-    nacos_server="$(prompt "Nacos 服务地址" "http://127.0.0.1:8848")"
-    nacos_namespace="$(prompt "Nacos 命名空间" "dev")"
-    remote_enabled="$(prompt "是否启用 Nacos 远程运行配置，填写 true 或 false" "true")"
-    case "${remote_enabled}" in
-      true|false) ;;
-      *) fail "远程运行配置只能填写 true 或 false" ;;
-    esac
-    formal_token_group="$(prompt "formal token 的 Nacos group" "HNIEOJ_SECRET_GROUP")"
-    formal_token_data_id="$(prompt "formal token 的 Nacos dataId" "hnieoj-judge-formal-token.yaml")"
-    if [[ ! -f "${PRIVATE_KEY_FILE}" ]]; then
-      warn "formal 私钥尚不存在：${PRIVATE_KEY_FILE}"
-      warn "请在启动节点前复制私钥到该路径"
+    if [[ -f "${CREDENTIAL_FILE}" ]]; then
+      chmod 600 "${CREDENTIAL_FILE}" 2>/dev/null || true
+      log "检测到已有正式节点凭证：${CREDENTIAL_FILE}"
     else
-      chmod 600 "${PRIVATE_KEY_FILE}" 2>/dev/null || true
+      warn "未找到正式节点凭证：${CREDENTIAL_FILE}"
+      warn "请管理员调用 POST /api/admin/judge/nodes/formal-tokens 签发，并把返回 data JSON 写入该文件。"
+      local bearer_token
+      bearer_token="$(prompt "可直接粘贴 Bearer JWT（留空稍后手工写入凭证文件）" "")"
+      if [[ -n "${bearer_token}" ]]; then
+        write_credential_file "{\"tokenType\":\"Bearer\",\"token\":$(yaml_quote "${bearer_token}")}"
+      fi
     fi
   else
     while true; do
       auth_code="$(prompt_secret_required "临时节点授权码")"
-      if exchange_temp_token "${backend_url}" "${node_name}" "${auth_code}"; then
-        temp_jwt="${TEMP_JWT}"
-        temp_token_type="${TEMP_TOKEN_TYPE}"
-        temp_node_id="${TEMP_NODE_ID}"
-        temp_token_id="${TEMP_TOKEN_ID}"
-        temp_expire_time="${TEMP_EXPIRE_TIME}"
+      if [[ -n "${auth_code}" ]]; then
         break
       fi
-      warn "临时授权码无效或已过期，请重新输入"
+      warn "临时节点首次接入需要授权码"
     done
+    log "temp 节点将在首次启动时用授权码注册，并把凭证原子写入 ${CREDENTIAL_FILE}"
   fi
 
-  write_config_file "${node_name}" "${node_type}" "${max_concurrency}" "${supported_modes}" "${backend_url}" \
-    "${rabbit_host}" "${rabbit_port}" "${rabbit_username}" "${rabbit_password}" "${rabbit_vhost}" \
-    "${auth_code}" "${temp_jwt}" "${temp_token_type}" "${temp_node_id}" "${temp_token_id}" "${temp_expire_time}" \
-    "${nacos_server}" "${nacos_namespace}" "${remote_enabled}" \
-    "${formal_token_group}" "${formal_token_data_id}"
+  write_config_file "${node_name}" "${node_type}" "${max_concurrency}" "${supported_modes}" "${backend_url}" "${auth_code}"
 }
 
 render_compose() {
@@ -604,7 +416,8 @@ EOF
       - /etc/hnieoj/go-judge/config.yaml
     volumes:
       - "${CONFIG_FILE}:/etc/hnieoj/go-judge/config.yaml:ro"
-      - "${SECURITY_DIR}:/etc/hnieoj/judge-security:ro"
+      # 凭证目录必须可写：续期成功后节点会原子替换 credential.json。
+      - "${CREDENTIAL_DIR}:/etc/hnieoj/judge-node"
       - "${CACHE_DIR}:/data/oj/judge-cache"
     networks:
       - hnieoj-judge
@@ -629,8 +442,10 @@ doctor() {
   preflight
   [[ -f "${CONFIG_FILE}" ]] || fail "缺少配置文件：${CONFIG_FILE}"
   [[ -f "${COMPOSE_FILE}" ]] || fail "缺少 Compose 文件：${COMPOSE_FILE}；请执行 '$0 render'"
-  if grep -Eq 'type:[[:space:]]*"?formal"?' "${CONFIG_FILE}" && [[ ! -f "${PRIVATE_KEY_FILE}" ]]; then
-    fail "formal 节点私钥缺失：${PRIVATE_KEY_FILE}"
+  if grep -Eq 'type:[[:space:]]*"?formal"?' "${CONFIG_FILE}" && [[ ! -f "${CREDENTIAL_FILE}" ]]; then
+    if ! grep -Eq 'token:[[:space:]]*"?[^"[:space:]]' "${CONFIG_FILE}"; then
+      fail "formal 节点缺少运行凭证：请将管理员签发的凭证 JSON 写入 ${CREDENTIAL_FILE}，或在配置中填写 credential.token"
+    fi
   fi
   docker_compose config >/dev/null
   log "预检查通过"
@@ -677,9 +492,9 @@ usage() {
 
 命令：
   deploy        配置缺失时先初始化，然后渲染 Compose、拉取镜像并重建服务。
-  init          交互式写入 ${CONFIG_FILE}。
+  init          交互式写入 ${CONFIG_FILE}（formal 需要凭证文件或 token，temp 需要授权码）。
   render        按当前环境变量和配置路径渲染 ${COMPOSE_FILE}。
-  doctor        检查 Docker、配置文件、Compose 文件和 formal 节点私钥。
+  doctor        检查 Docker、配置文件、Compose 文件和 formal 节点运行凭证。
   pull          从 Docker Hub 拉取 ${IMAGE}。
   build         在源码仓库中基于 Dockerfile.hnieoj 构建 ${IMAGE}。
   up            渲染 Compose 并启动服务。
@@ -689,13 +504,16 @@ usage() {
   down          停止并删除服务。
   help          显示帮助。
 
+节点不再依赖 RabbitMQ/Nacos；运行凭证由后端逐节点签发，重启使用 ${CREDENTIAL_FILE}。
+
 常用环境变量：
   IMAGE_REPOSITORY=${IMAGE_REPOSITORY}
   IMAGE_TAG=${IMAGE_TAG}
   IMAGE=${IMAGE}
   PROJECT_NAME=${PROJECT_NAME}
   CONFIG_DIR=${CONFIG_DIR}
-  SECURITY_DIR=${SECURITY_DIR}
+  CREDENTIAL_DIR=${CREDENTIAL_DIR}
+  CREDENTIAL_FILE=${CREDENTIAL_FILE}
   CACHE_DIR=${CACHE_DIR}
   GOJUDGE_FILE_TIMEOUT=${GOJUDGE_FILE_TIMEOUT}
   PUBLISH_GOJUDGE=${PUBLISH_GOJUDGE}
