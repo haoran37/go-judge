@@ -204,6 +204,10 @@ func unzipSafe(zipPath, dst string) error {
 		return err
 	}
 	defer zr.Close()
+	dstAbs, err := filepath.Abs(dst)
+	if err != nil {
+		return err
+	}
 	for _, f := range zr.File {
 		if err := validateZipEntry(f.Name); err != nil {
 			return err
@@ -215,8 +219,17 @@ func unzipSafe(zipPath, dst string) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(dst, f.Name)
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		target := filepath.Join(dstAbs, f.Name)
+		targetAbs, err := filepath.Abs(target)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		if targetAbs != dstAbs && !strings.HasPrefix(targetAbs, dstAbs+string(os.PathSeparator)) {
+			rc.Close()
+			return fmt.Errorf("zip entry escapes destination: %s", f.Name)
+		}
+		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err != nil {
 			rc.Close()
 			return err
