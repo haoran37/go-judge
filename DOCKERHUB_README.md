@@ -38,8 +38,8 @@ curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/master/deploy/dep
 ## 部署脚本做什么
 
 - 交互式生成 `/etc/hnieoj/go-judge/config.yaml`。
-- temp 节点启动前先用授权码兑换 JWT，失败会立即要求重新输入。
-- 渲染 `/etc/hnieoj/go-judge/compose.yaml`。
+- 准备 `/etc/hnieoj/judge-node/credential.json`：formal 由运维交付，temp 首次启动用授权码注册后自动写入。
+- 渲染 `/etc/hnieoj/go-judge/compose.yaml`（凭证目录以可写方式挂载，便于续期后原子替换）。
 - 拉取指定 Docker Hub 镜像。
 - 校验配置和 Docker 环境。
 - 重建旧容器。
@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/haoran37/go-judge/master/deploy/dep
 ## 注意事项
 
 - 不要将沙箱 HTTP 端口暴露到公网。
-- 保持 `-file-timeout` 开启，避免临时文件长期堆积。
-- formal 节点需要挂载私钥到 `/etc/hnieoj/judge-security/judge_formal_private.pem`。
+- 后端网关必须使用 HTTPS；仅回环地址允许明文 HTTP 用于本地开发。
+- formal 节点需要把管理员签发的逐节点凭证 JSON 放到 `/etc/hnieoj/judge-node/credential.json`。
 - SPJ 和交互题需要后端、题目数据和节点联调完成后再开启。
 - 镜像构建会升级 Debian 系统包；若 Docker Hub 扫描仍显示 CVE，通常需要等待 Debian 发布修复包或后续切换基础镜像。
