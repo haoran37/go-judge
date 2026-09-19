@@ -10,17 +10,16 @@ import (
 	"strings"
 
 	"github.com/criyle/go-judge/internal/hnieoj/config"
+	"github.com/criyle/go-judge/internal/hnieoj/securefile"
 	"github.com/goccy/go-yaml"
 	"golang.org/x/crypto/argon2"
 )
 
 const (
-	ConfigFileName         = "config.yaml"
-	AdminFileName          = "admin.json"
-	SecurityDirName        = "security"
-	FormalPrivateKeyName   = "judge_formal_private.pem"
-	TempInstanceIDName     = "temp_node_instance_id"
-	TempInstanceSecretName = "temp_node_instance_secret"
+	ConfigFileName    = "config.yaml"
+	AdminFileName     = "admin.json"
+	BootstrapFileName = "bootstrap_token"
+	SecurityDirName   = "security"
 )
 
 type Store struct {
@@ -48,6 +47,37 @@ func (s *Store) Ensure() error {
 
 func (s *Store) ConfigPath() string {
 	return filepath.Join(s.dir, ConfigFileName)
+}
+
+// BootstrapPath 是一次性入网 bootstrap 明文的默认路径（0600，注册成功后删除）。
+func (s *Store) BootstrapPath() string {
+	return filepath.Join(s.securityDir(), BootstrapFileName)
+}
+
+// Dir 返回 WebUI 状态目录。
+func (s *Store) Dir() string {
+	return s.dir
+}
+
+// IdentityPath 返回本地长期身份文件的默认路径。
+func (s *Store) IdentityPath() string {
+	return filepath.Join(s.dir, "identity.json")
+}
+
+// BootstrapConfigured 表示本地是否还有未消费的 bootstrap 明文。
+func (s *Store) BootstrapConfigured() bool {
+	return !emptyFile(s.BootstrapPath())
+}
+
+// WriteBootstrapToken 以 0600 原子写入 bootstrap 明文，绝不写入 config.yaml 或日志。
+func (s *Store) WriteBootstrapToken(token string) error {
+	if strings.TrimSpace(token) == "" {
+		return errors.New("bootstrap token is required")
+	}
+	if err := s.Ensure(); err != nil {
+		return err
+	}
+	return securefile.WriteFileAtomic(s.BootstrapPath(), []byte(strings.TrimSpace(token)), 0o600)
 }
 
 func (s *Store) LoadConfig() (*config.Config, bool, error) {
@@ -132,43 +162,6 @@ func (s *Store) VerifyPassword(password string) bool {
 		diff |= got[i] ^ want[i]
 	}
 	return diff == 0
-}
-
-func (s *Store) SaveFormalPrivateKey(pem string) (string, error) {
-	if !strings.Contains(pem, "PRIVATE KEY") {
-		return "", errors.New("invalid private key pem")
-	}
-	if err := s.Ensure(); err != nil {
-		return "", err
-	}
-	path := filepath.Join(s.securityDir(), FormalPrivateKeyName)
-	if err := os.WriteFile(path, []byte(pem), 0o600); err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
-func (s *Store) EnsureTempIdentity() (string, string, error) {
-	if err := s.Ensure(); err != nil {
-		return "", "", err
-	}
-	idPath := filepath.Join(s.securityDir(), TempInstanceIDName)
-	secretPath := filepath.Join(s.securityDir(), TempInstanceSecretName)
-	if emptyFile(idPath) {
-		if err := os.WriteFile(idPath, []byte(randomToken(24)), 0o600); err != nil {
-			return "", "", err
-		}
-	}
-	if emptyFile(secretPath) {
-		if err := os.WriteFile(secretPath, []byte(randomToken(32)), 0o600); err != nil {
-			return "", "", err
-		}
-	}
-	id, err := os.ReadFile(idPath)
-	if err != nil {
-		return "", "", err
-	}
-	return strings.TrimSpace(string(id)), secretPath, nil
 }
 
 func (s *Store) securityDir() string {

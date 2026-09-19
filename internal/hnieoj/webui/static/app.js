@@ -309,11 +309,11 @@ function configureChoiceHTML() {
       <div class="choice-grid">
         <button id="choose-formal" class="choice">
           <strong>正式节点</strong>
-          <span>用于长期运行的生产判题节点。需要上传正式节点私钥。</span>
+          <span>长期运行的生产判题节点。输入管理员签发的一次性 Bootstrap，节点生成独立 Ed25519 身份并完成挑战注册。</span>
         </button>
         <button id="choose-temp" class="choice">
           <strong>临时节点</strong>
-          <span>用于临时扩容。需要输入后端发放的临时授权码并兑换 JWT。</span>
+          <span>临时扩容节点。同样使用独立 Ed25519 身份 + 一次性 Bootstrap，授权到期后凭密钥重新认证，无需重新注册。</span>
         </button>
       </div>
     </section>`;
@@ -359,6 +359,11 @@ function dashboardHTML(system) {
       <div class="kv-grid">
         ${kv("节点名称", runtime.nodeName || "未配置")}
         ${kv("节点类型", nodeTypeText(runtime.nodeType))}
+        ${kv("节点 ID", runtime.nodeId || "未登记")}
+        ${kv("当前 Key ID", runtime.keyId || "未登记")}
+        ${kv("Session Epoch", runtime.sessionEpoch || 0)}
+        ${kv("待确认结果", runtime.pendingResults || 0)}
+        ${kv("是否排空", runtime.draining ? "是" : "否")}
         ${kv("启动时间", formatTime(runtime.startedAt))}
         ${kv("最近错误", runtime.lastError || "无", runtime.lastError ? "error" : "ok")}
       </div>
@@ -408,62 +413,62 @@ function configFormHTML(mode, cfg) {
         <div class="form-grid two">
           ${field("节点名称", "node-name", c.node.name)}
           ${field("最大并发", "max-concurrency", c.node.maxConcurrency, "number")}
-          ${field("HnieOJ 后端地址", "base-url", c.hnieoj.baseUrl, "text", "http://gateway:8800")}
+          ${field("HnieOJ 后端地址", "base-url", c.hnieoj.baseUrl, "text", "https://oj.example.com")}
+          ${field("WSS 任务通道（留空自动推导）", "wss-url", c.hnieoj.wssUrl, "text", "wss://oj.example.com/ws/judge/node")}
+          ${field("签名 audience（留空取 host）", "audience", c.hnieoj.audience)}
           ${judgeModeCheckboxes(c.node.supportedJudgeModes)}
-          ${field("心跳间隔", "heartbeat-interval", c.heartbeat.interval || "30s")}
         </div>
       </section>
-      ${mode === "formal" ? formalNacosHTML(c) : ""}
+      ${bootstrapHTML(c, mode)}
       <section class="panel">
-        <h2>RabbitMQ</h2>
+        <h2>身份与自动轮换</h2>
         <div class="form-grid two">
-          ${field("主机", "rabbit-host", c.rabbitmq.host)}
-          ${field("端口", "rabbit-port", c.rabbitmq.port, "number")}
-          ${field("用户", "rabbit-user", c.rabbitmq.username)}
-          ${field("密码", "rabbit-password", "", "password", c.rabbitmq.passwordConfigured ? "留空保持原密码" : "")}
-          ${field("vhost", "rabbit-vhost", c.rabbitmq.virtualHost)}
+          ${field("身份文件", "identity-file", c.identity.file)}
+          ${field("状态目录", "identity-state-dir", c.identity.stateDir)}
+          ${field("自动轮换周期", "rotation-interval", c.rotation.interval || "720h")}
+          ${field("旧密钥 grace", "rotation-grace", c.rotation.grace || "5m")}
+        </div>
+        <p class="hint">身份文件含本地私钥，POSIX 权限 0700/0600，Windows 使用 current-user-only ACL；绝不进入沙箱或对外返回。</p>
+      </section>
+      <section class="panel">
+        <h2>任务执行</h2>
+        <div class="form-grid two">
+          ${field("空队列最小退避", "worker-empty-min-backoff", c.worker.emptyMinBackoff || "200ms")}
+          ${field("空队列最大退避", "worker-empty-max-backoff", c.worker.emptyMaxBackoff || "5s")}
+          ${field("排空超时", "worker-drain-timeout", c.worker.drainTimeout || "5m")}
         </div>
       </section>
       ${cacheConfigHTML(c)}
-      ${mode === "formal" ? formalKeyHTML(c) : tempAuthHTML(c)}
       <section class="form-footer">
-        ${mode === "formal" ? `<button class="primary" type="submit">保存正式节点配置</button>` : tempButtonsHTML()}
+        <button class="primary" type="submit">保存并完成入网配置</button>
         <button id="back-config" type="button">返回</button>
         <div id="config-message" class="message" role="status"></div>
       </section>
     </form>`;
 }
 
-function formalKeyHTML(cfg) {
-  const placeholder = cfg.hnieoj.formalToken.privateKeyConfigured ? "已配置；留空保持原私钥" : "-----BEGIN PRIVATE KEY-----";
+function bootstrapHTML(cfg, mode) {
+  const identity = cfg.identity || {};
+  const configured = identity.bootstrapConfigured
+    ? "本地已保存一次性 Bootstrap（注册成功后自动删除）"
+    : "尚未提供 Bootstrap";
+  const publicIdentity = runtime.identity || {};
   return `
     <section class="panel">
-      <h2>正式节点私钥</h2>
+      <h2>${mode === "temp" ? "临时节点入网" : "正式节点入网"}</h2>
       <div class="form-grid">
         <div class="field">
-          <label for="formal-private-key-file">上传 PEM 文件</label>
-          <input id="formal-private-key-file" type="file" accept=".pem,.key,text/plain">
-        </div>
-        <div class="field">
-          <label for="formal-private-key">PEM 内容</label>
-          <textarea id="formal-private-key" placeholder="${escapeAttr(placeholder)}"></textarea>
+          <label for="bootstrap-token">一次性 Bootstrap</label>
+          <input id="bootstrap-token" type="password" placeholder="仅首次入网需要；不会回显，也不会写入 config.yaml">
         </div>
       </div>
-    </section>`;
-}
-
-function formalNacosHTML(cfg) {
-  const nacos = cfg.hnieoj.formalToken.nacos || {};
-  return `
-    <section class="panel">
-      <h2>Nacos formal token</h2>
-      <div class="form-grid two">
-        ${field("Nacos 地址", "formal-nacos-server", nacos.serverAddr || "http://127.0.0.1:8848")}
-        ${field("Namespace", "formal-nacos-namespace", nacos.namespace || "dev")}
-        ${field("Group", "formal-nacos-group", nacos.group || "HNIEOJ_SECRET_GROUP")}
-        ${field("Data ID", "formal-nacos-data-id", nacos.dataId || "hnieoj-judge-formal-token.yaml")}
-        ${field("刷新间隔", "formal-refresh-interval", cfg.hnieoj.formalToken.refreshInterval || "30s")}
+      <div class="token-summary">
+        ${kv("Bootstrap 状态", configured)}
+        ${kv("节点 ID", publicIdentity.nodeId || "未登记")}
+        ${kv("Key ID", publicIdentity.keyId || "未登记")}
+        ${kv("轮换状态", publicIdentity.rotationStatus || "无待处理轮换")}
       </div>
+      <p class="hint">节点首次启动即生成真实随机 Ed25519 keypair 与 enrollmentId 并原子持久化；重启复用同一身份，不消耗新 Bootstrap。</p>
     </section>`;
 }
 
@@ -502,95 +507,24 @@ function judgeModeCheckboxes(selectedModes = []) {
     </div>`;
 }
 
-function tempAuthHTML(cfg) {
-  const token = cfg.hnieoj.tempToken || {};
-  return `
-    <section class="panel">
-      <h2>临时授权码兑换</h2>
-      <div class="form-grid">
-        <div class="field">
-          <label for="temp-auth-code">临时授权码</label>
-          <input id="temp-auth-code" type="password" placeholder="输入后点击下方兑换按钮">
-        </div>
-      </div>
-      <div class="token-summary">
-        ${kv("节点 ID", token.nodeId || "未兑换")}
-        ${kv("Token ID", token.tokenId || "未兑换")}
-        ${kv("过期时间", token.expireTime || "未兑换")}
-      </div>
-    </section>`;
-}
-
-function tempButtonsHTML() {
-  const saveButton = setup.configured ? `<button id="save-temp-config" type="button">保存基础配置</button>` : "";
-  return `${saveButton}<button id="exchange-token" class="primary" type="button">兑换临时授权码</button>`;
-}
-
 function bindConfigForm(mode) {
   document.getElementById("back-config").onclick = () => navigate("/configure");
-  const keyFile = document.getElementById("formal-private-key-file");
-  if (keyFile) {
-    keyFile.onchange = async () => {
-      const file = keyFile.files && keyFile.files[0];
-      if (file) {
-        document.getElementById("formal-private-key").value = await file.text();
-      }
-    };
-  }
-  if (mode === "formal") {
-    document.getElementById("config-form").onsubmit = async (event) => {
-      event.preventDefault();
-      await submitWithMessage("config-message", async () => {
-        await api("/api/v1/setup/formal", {
-          method: "POST",
-          body: JSON.stringify({ config: formConfig(mode), privateKeyPem: value("formal-private-key") }),
-        });
-        currentConfig = null;
-        navigate("/dashboard", true);
-      }, "配置已保存");
-    };
-    return;
-  }
-
-  document.getElementById("config-form").onsubmit = (event) => event.preventDefault();
-
-  const saveButton = document.getElementById("save-temp-config");
-  if (saveButton) {
-    saveButton.onclick = async () => {
-      await submitWithMessage("config-message", async () => {
-        await api("/api/v1/config", {
-          method: "PUT",
-          body: JSON.stringify(formConfig("temp")),
-        });
-        currentConfig = null;
-      }, "基础配置已保存，重启判题服务后生效");
-    };
-  }
-
-  document.getElementById("exchange-token").onclick = async () => {
+  document.getElementById("config-form").onsubmit = async (event) => {
+    event.preventDefault();
     await submitWithMessage("config-message", async () => {
-      const authCode = value("temp-auth-code");
-      if (!authCode) {
-        throw new Error("请输入临时授权码");
-      }
-      const result = await api("/api/v1/setup/temp/exchange", {
+      const bootstrapToken = value("bootstrap-token");
+      const result = await api("/api/v1/setup/bootstrap", {
         method: "POST",
-        body: JSON.stringify({ config: formConfig("temp"), authCode }),
+        body: JSON.stringify({ config: formConfig(mode, bootstrapToken) }),
       });
-      setup.configured = true;
       currentConfig = result.config || null;
       await loadSetupStatus();
-      await renderAuthed("/configure/temp", "");
-      const message = document.getElementById("config-message");
-      if (message) {
-        message.textContent = "临时授权码兑换成功，JWT 已写入本机配置";
-        message.classList.add("ok");
-      }
-    });
+      navigate("/dashboard", true);
+    }, "配置已保存；启动判题服务后将用本地 Ed25519 身份完成挑战注册");
   };
 }
 
-function formConfig(mode) {
+function formConfig(mode, bootstrapToken = "") {
   const maxConcurrency = Number(value("max-concurrency") || 1);
   return {
     node: {
@@ -601,34 +535,20 @@ function formConfig(mode) {
     },
     hnieoj: {
       baseUrl: value("base-url"),
+      wssUrl: value("wss-url"),
+      audience: value("audience"),
       requestTimeout: "30s",
-      formalToken: {
-        cipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding",
-        refreshInterval: value("formal-refresh-interval") || "30s",
-        nacos: {
-          serverAddr: value("formal-nacos-server"),
-          namespace: value("formal-nacos-namespace"),
-          group: value("formal-nacos-group"),
-          dataId: value("formal-nacos-data-id"),
-        },
-      },
-      tempToken: { proofType: "ed25519" },
     },
-    rabbitmq: {
-      host: value("rabbit-host"),
-      port: Number(value("rabbit-port") || 5672),
-      username: value("rabbit-user"),
-      password: value("rabbit-password"),
-      virtualHost: value("rabbit-vhost"),
-      exchange: "hnieoj.judge.exchange",
-      queue: "hnieoj.judge.task",
-      routingKey: "judge.submission.created",
-      deadLetterExchange: "hnieoj.judge.dlx",
-      deadLetterQueue: "hnieoj.judge.task.dlq",
-      deadLetterRoutingKey: "judge.submission.created.dlq",
-      prefetch: maxConcurrency,
-      maxRetries: 3,
-      retryBackoff: "10s",
+    identity: {
+      file: value("identity-file"),
+      stateDir: value("identity-state-dir"),
+      bootstrapToken,
+    },
+    rotation: {
+      enabled: true,
+      interval: value("rotation-interval") || "720h",
+      grace: value("rotation-grace") || "5m",
+      confirmTimeout: "30s",
     },
     testdata: {
       cacheRoot: value("cache-root") || "/data/oj/judge-cache",
@@ -638,9 +558,11 @@ function formConfig(mode) {
       statsInterval: value("cache-stats-interval") || "5m",
     },
     gojudge: { endpoint: "http://127.0.0.1:5050" },
-    reporter: { mode: "http", endpoint: "/judge/submissions/{submissionId}/events" },
-    heartbeat: { enabled: true, endpoint: "/judge/nodes/heartbeat", interval: value("heartbeat-interval") || "30s" },
-    remoteConfig: { enabled: false, nacos: {} },
+    worker: {
+      emptyMinBackoff: value("worker-empty-min-backoff") || "200ms",
+      emptyMaxBackoff: value("worker-empty-max-backoff") || "5s",
+      drainTimeout: value("worker-drain-timeout") || "5m",
+    },
   };
 }
 
@@ -711,42 +633,20 @@ async function loadCache() {
 function normalizedConfig(cfg = {}) {
   const fallback = {
     node: { name: "judge-node-01", maxConcurrency: 2, supportedJudgeModes: ["default"] },
-    hnieoj: {
-      baseUrl: "",
-      formalToken: {
-        refreshInterval: "30s",
-        nacos: {
-          serverAddr: "http://127.0.0.1:8848",
-          namespace: "dev",
-          group: "HNIEOJ_SECRET_GROUP",
-          dataId: "hnieoj-judge-formal-token.yaml",
-        },
-      },
-      tempToken: {},
-    },
-    rabbitmq: { host: "rabbitmq", port: 5672, username: "hnieoj_judge", virtualHost: "hnieoj" },
-    heartbeat: { interval: "30s" },
+    hnieoj: { baseUrl: "", wssUrl: "", audience: "" },
+    identity: { file: "/var/lib/hnieoj-judge-node/identity.json", stateDir: "/var/lib/hnieoj-judge-node", bootstrapConfigured: false },
+    rotation: { enabled: true, interval: "720h", grace: "5m", confirmTimeout: "30s" },
+    worker: { emptyMinBackoff: "200ms", emptyMaxBackoff: "5s", drainTimeout: "5m" },
     testdata: { cacheRoot: "/data/oj/judge-cache", maxCacheBytes: 21474836480, maxUnusedDuration: "72h", cleanupInterval: "1h", statsInterval: "5m" },
   };
   return {
     ...fallback,
     ...cfg,
     node: { ...fallback.node, ...(cfg.node || {}) },
-    hnieoj: {
-      ...fallback.hnieoj,
-      ...(cfg.hnieoj || {}),
-      formalToken: {
-        ...fallback.hnieoj.formalToken,
-        ...(cfg.hnieoj?.formalToken || {}),
-        nacos: {
-          ...fallback.hnieoj.formalToken.nacos,
-          ...(cfg.hnieoj?.formalToken?.nacos || {}),
-        },
-      },
-      tempToken: { ...(cfg.hnieoj?.tempToken || {}) },
-    },
-    rabbitmq: { ...fallback.rabbitmq, ...(cfg.rabbitmq || {}) },
-    heartbeat: { ...fallback.heartbeat, ...(cfg.heartbeat || {}) },
+    hnieoj: { ...fallback.hnieoj, ...(cfg.hnieoj || {}) },
+    identity: { ...fallback.identity, ...(cfg.identity || {}) },
+    rotation: { ...fallback.rotation, ...(cfg.rotation || {}) },
+    worker: { ...fallback.worker, ...(cfg.worker || {}) },
     testdata: { ...fallback.testdata, ...(cfg.testdata || {}) },
   };
 }

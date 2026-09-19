@@ -3,14 +3,13 @@ package webui
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/criyle/go-judge/internal/hnieoj/auth"
 	"github.com/criyle/go-judge/internal/hnieoj/config"
 	"github.com/criyle/go-judge/internal/hnieoj/logging"
 	"github.com/criyle/go-judge/internal/hnieoj/node"
@@ -29,14 +28,13 @@ type Server struct {
 }
 
 type ConfigDTO struct {
-	Node      NodeDTO      `json:"node"`
-	HnieOJ    HnieOJDTO    `json:"hnieoj"`
-	RabbitMQ  RabbitMQDTO  `json:"rabbitmq"`
-	Testdata  TestdataDTO  `json:"testdata"`
-	GoJudge   GoJudgeDTO   `json:"gojudge"`
-	Reporter  ReporterDTO  `json:"reporter"`
-	Heartbeat HeartbeatDTO `json:"heartbeat"`
-	Remote    RemoteDTO    `json:"remoteConfig"`
+	Node     NodeDTO     `json:"node"`
+	HnieOJ   HnieOJDTO   `json:"hnieoj"`
+	Identity IdentityDTO `json:"identity"`
+	Rotation RotationDTO `json:"rotation"`
+	Testdata TestdataDTO `json:"testdata"`
+	GoJudge  GoJudgeDTO  `json:"gojudge"`
+	Worker   WorkerDTO   `json:"worker"`
 }
 
 type NodeDTO struct {
@@ -47,54 +45,26 @@ type NodeDTO struct {
 }
 
 type HnieOJDTO struct {
-	BaseURL        string         `json:"baseUrl"`
-	RequestTimeout string         `json:"requestTimeout"`
-	FormalToken    FormalTokenDTO `json:"formalToken"`
-	TempToken      TempTokenDTO   `json:"tempToken"`
+	BaseURL        string `json:"baseUrl"`
+	WSSURL         string `json:"wssUrl"`
+	Audience       string `json:"audience"`
+	RequestTimeout string `json:"requestTimeout"`
 }
 
-type FormalTokenDTO struct {
-	PrivateKeyConfigured bool     `json:"privateKeyConfigured"`
-	CipherAlgorithm      string   `json:"cipherAlgorithm"`
-	RefreshInterval      string   `json:"refreshInterval"`
-	Nacos                NacosDTO `json:"nacos"`
+// IdentityDTO 只暴露配置标志与路径，绝不返回私钥/enrollmentId 之外的秘密。
+// bootstrapToken 只写不读。
+type IdentityDTO struct {
+	File                string `json:"file"`
+	StateDir            string `json:"stateDir"`
+	BootstrapConfigured bool   `json:"bootstrapConfigured"`
+	BootstrapToken      string `json:"bootstrapToken,omitempty"`
 }
 
-type NacosDTO struct {
-	ServerAddr string `json:"serverAddr"`
-	Namespace  string `json:"namespace"`
-	Group      string `json:"group"`
-	DataID     string `json:"dataId"`
-}
-
-type TempTokenDTO struct {
-	AuthCode           string `json:"authCode,omitempty"`
-	TokenType          string `json:"tokenType"`
-	NodeID             string `json:"nodeId"`
-	TokenID            string `json:"tokenId"`
-	ExpireTime         string `json:"expireTime"`
-	InstanceID         string `json:"instanceId"`
-	FingerprintHash    string `json:"fingerprintHash"`
-	ProofType          string `json:"proofType"`
-	InstanceConfigured bool   `json:"instanceConfigured"`
-}
-
-type RabbitMQDTO struct {
-	Host                 string `json:"host"`
-	Port                 int    `json:"port"`
-	Username             string `json:"username"`
-	Password             string `json:"password,omitempty"`
-	PasswordConfigured   bool   `json:"passwordConfigured"`
-	VirtualHost          string `json:"virtualHost"`
-	Exchange             string `json:"exchange"`
-	Queue                string `json:"queue"`
-	RoutingKey           string `json:"routingKey"`
-	DeadLetterExchange   string `json:"deadLetterExchange"`
-	DeadLetterQueue      string `json:"deadLetterQueue"`
-	DeadLetterRoutingKey string `json:"deadLetterRoutingKey"`
-	Prefetch             int    `json:"prefetch"`
-	MaxRetries           int    `json:"maxRetries"`
-	RetryBackoff         string `json:"retryBackoff"`
+type RotationDTO struct {
+	Enabled        bool   `json:"enabled"`
+	Interval       string `json:"interval"`
+	Grace          string `json:"grace"`
+	ConfirmTimeout string `json:"confirmTimeout"`
 }
 
 type TestdataDTO struct {
@@ -111,26 +81,17 @@ type GoJudgeDTO struct {
 	AuthTokenConfigured bool   `json:"authTokenConfigured"`
 }
 
-type ReporterDTO struct {
-	Mode     string `json:"mode"`
-	Endpoint string `json:"endpoint"`
-}
-
-type HeartbeatDTO struct {
-	Enabled  bool   `json:"enabled"`
-	Endpoint string `json:"endpoint"`
-	Interval string `json:"interval"`
-}
-
-type RemoteDTO struct {
-	Enabled bool     `json:"enabled"`
-	Nacos   NacosDTO `json:"nacos"`
+type WorkerDTO struct {
+	EmptyMinBackoff string `json:"emptyMinBackoff"`
+	EmptyMaxBackoff string `json:"emptyMaxBackoff"`
+	DrainTimeout    string `json:"drainTimeout"`
 }
 
 type setupStatusResponse struct {
 	AdminInitialized bool        `json:"adminInitialized"`
 	Authenticated    bool        `json:"authenticated"`
 	Configured       bool        `json:"configured"`
+	BootstrapReady   bool        `json:"bootstrapReady"`
 	Runtime          node.Status `json:"runtime"`
 }
 
@@ -146,8 +107,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/auth/logout", s.withAuth(s.handleLogout))
 	mux.HandleFunc("/api/v1/auth/me", s.withAuth(s.handleMe))
 	mux.HandleFunc("/api/v1/config", s.withAuth(s.handleConfig))
-	mux.HandleFunc("/api/v1/setup/formal", s.withAuth(s.handleSetupFormal))
-	mux.HandleFunc("/api/v1/setup/temp/exchange", s.withAuth(s.handleSetupTemp))
+	mux.HandleFunc("/api/v1/setup/bootstrap", s.withAuth(s.handleSetupBootstrap))
 	mux.HandleFunc("/api/v1/runtime/start", s.withAuth(s.handleStart))
 	mux.HandleFunc("/api/v1/runtime/stop", s.withAuth(s.handleStop))
 	mux.HandleFunc("/api/v1/runtime/restart", s.withAuth(s.handleRestart))
@@ -172,6 +132,7 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		AdminInitialized: s.store.AdminInitialized(),
 		Authenticated:    authenticated,
 		Configured:       configured,
+		BootstrapReady:   s.store.BootstrapConfigured(),
 		Runtime:          s.manager.Status(),
 	})
 }
@@ -255,7 +216,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				cfg = stored
 			}
 		}
-		writeJSON(w, configToDTO(*cfg))
+		writeJSON(w, s.configToDTO(*cfg))
 	case http.MethodPut:
 		current, exists, err := s.store.LoadConfig()
 		if err != nil {
@@ -270,11 +231,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg, err := dtoToConfig(dto, *current)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		cfg := s.dtoToConfig(dto, *current)
 		if err := cfg.Validate(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -290,14 +247,15 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleSetupFormal(w http.ResponseWriter, r *http.Request) {
+// handleSetupBootstrap 是统一的正式/临时节点入网入口：保存配置并安全写入一次性
+// bootstrap 明文（0600），随后由运行时完成 Ed25519 挑战注册。绝不回显 bootstrap。
+func (s *Server) handleSetupBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
 	}
 	var req struct {
-		Config        ConfigDTO `json:"config"`
-		PrivateKeyPEM string    `json:"privateKeyPem"`
+		Config ConfigDTO `json:"config"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -308,24 +266,24 @@ func (s *Server) handleSetupFormal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	cfg, err := dtoToConfig(req.Config, base)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	cfg := s.dtoToConfig(req.Config, base)
+	nodeType := strings.TrimSpace(cfg.Node.Type)
+	if nodeType != "formal" && nodeType != "temp" {
+		http.Error(w, "节点类型必须是 formal 或 temp", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.PrivateKeyPEM) != "" {
-		keyPath, err := s.store.SaveFormalPrivateKey(req.PrivateKeyPEM)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+	cfg.Bootstrap.TokenFile = s.store.BootstrapPath()
+	bootstrapToken := strings.TrimSpace(req.Config.Identity.BootstrapToken)
+	cfg.Bootstrap.Token = ""
+	if bootstrapToken != "" {
+		if err := s.store.WriteBootstrapToken(bootstrapToken); err != nil {
+			http.Error(w, "保存 bootstrap 失败："+err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg.HnieOJ.FormalToken.PrivateKeyPath = keyPath
-	} else if strings.TrimSpace(cfg.HnieOJ.FormalToken.PrivateKeyPath) == "" {
-		http.Error(w, "formal private key pem is required", http.StatusBadRequest)
+	} else if !s.store.BootstrapConfigured() {
+		http.Error(w, "首次入网需要提供一次性 bootstrap token", http.StatusBadRequest)
 		return
 	}
-	cfg.Node.Type = "formal"
-	cfg.HnieOJ.TempToken = config.TempToken{ProofType: "ed25519"}
 	if err := cfg.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -335,80 +293,7 @@ func (s *Server) handleSetupFormal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.manager.SetConfig(*cfg)
-	writeJSON(w, map[string]any{"ok": true, "config": configToDTO(*cfg)})
-}
-
-func (s *Server) handleSetupTemp(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
-		return
-	}
-	var req struct {
-		Config   ConfigDTO `json:"config"`
-		AuthCode string    `json:"authCode"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	base, err := s.configBase()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	cfg, err := dtoToConfig(req.Config, base)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	instanceID, secretPath, err := s.store.EnsureTempIdentity()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	cfg.Node.Type = "temp"
-	cfg.HnieOJ.TempToken.AuthCode = req.AuthCode
-	cfg.HnieOJ.TempToken.InstanceID = instanceID
-	cfg.HnieOJ.TempToken.InstanceSecretPath = secretPath
-	cfg.HnieOJ.TempToken.ProofType = "ed25519"
-	cfg.HnieOJ.FormalToken.PrivateKeyPath = ""
-	if err := cfg.Validate(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	httpClient := &http.Client{Timeout: cfg.HnieOJ.RequestTimeout}
-	if s.logs != nil {
-		s.logs.Info("temp token exchange started",
-			logging.String("baseUrl", cfg.HnieOJ.BaseURL),
-			logging.String("nodeName", cfg.Node.Name),
-			logging.String("timeout", cfg.HnieOJ.RequestTimeout.String()))
-	}
-	cred, err := auth.ExchangeTempToken(r.Context(), *cfg, httpClient)
-	if err != nil {
-		if s.logs != nil {
-			s.logs.Warn("temp token exchange failed",
-				logging.String("baseUrl", cfg.HnieOJ.BaseURL),
-				logging.String("nodeName", cfg.Node.Name),
-				logging.String("timeout", cfg.HnieOJ.RequestTimeout.String()),
-				logging.Error(err))
-		}
-		http.Error(w, "临时授权码兑换失败："+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if s.logs != nil {
-		s.logs.Info("temp token exchange succeeded",
-			logging.String("baseUrl", cfg.HnieOJ.BaseURL),
-			logging.String("nodeName", cfg.Node.Name),
-			logging.String("nodeId", cred.NodeID),
-			logging.String("tokenId", cred.TokenID))
-	}
-	fillTempCredential(cfg, cred)
-	if err := s.store.SaveConfig(*cfg); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.manager.SetConfig(*cfg)
-	writeJSON(w, map[string]any{"ok": true, "config": configToDTO(*cfg)})
+	writeJSON(w, map[string]any{"ok": true, "config": s.configToDTO(*cfg)})
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -602,20 +487,92 @@ func (s *Server) effectiveConfig() (*config.Config, error) {
 	return config.Default(), nil
 }
 
-func fillTempCredential(cfg *config.Config, cred *auth.Credential) {
-	cfg.HnieOJ.TempToken.NodeID = cred.NodeID
-	cfg.HnieOJ.TempToken.TokenID = cred.TokenID
-	cfg.HnieOJ.TempToken.ExpireTime = cred.ExpireTime.Format(time.RFC3339)
-	cfg.HnieOJ.TempToken.FingerprintHash = cred.FingerprintHash
-	tokenType := "Bearer"
-	value := strings.TrimSpace(cred.HeaderValue)
-	if strings.Contains(value, " ") {
-		parts := strings.SplitN(value, " ", 2)
-		tokenType = parts[0]
-		value = parts[1]
+func (s *Server) dtoToConfig(dto ConfigDTO, base config.Config) *config.Config {
+	cfg := base
+	cfg.Node.Name = defaultString(dto.Node.Name, cfg.Node.Name)
+	cfg.Node.Type = defaultString(dto.Node.Type, cfg.Node.Type)
+	cfg.Node.MaxConcurrency = dto.Node.MaxConcurrency
+	cfg.Node.SupportedJudgeModes = dto.Node.SupportedJudgeModes
+	cfg.HnieOJ.BaseURL = dto.HnieOJ.BaseURL
+	cfg.HnieOJ.WSSURL = dto.HnieOJ.WSSURL
+	cfg.HnieOJ.Audience = dto.HnieOJ.Audience
+	cfg.HnieOJ.RequestTimeout = parseDurationOrDefault(dto.HnieOJ.RequestTimeout, cfg.HnieOJ.RequestTimeout, 30*time.Second)
+	if strings.TrimSpace(dto.Identity.File) != "" {
+		cfg.Identity.File = dto.Identity.File
 	}
-	cfg.HnieOJ.TempToken.TokenType = tokenType
-	cfg.HnieOJ.TempToken.JWT = value
+	if strings.TrimSpace(cfg.Identity.File) == "" {
+		cfg.Identity.File = s.store.IdentityPath()
+	}
+	if strings.TrimSpace(dto.Identity.StateDir) != "" {
+		cfg.Identity.StateDir = dto.Identity.StateDir
+	}
+	if strings.TrimSpace(cfg.Identity.StateDir) == "" {
+		cfg.Identity.StateDir = s.store.Dir()
+	}
+	if strings.TrimSpace(cfg.WSS.ResultQueueDir) == "" {
+		cfg.WSS.ResultQueueDir = filepath.Join(cfg.Identity.StateDir, "results")
+	}
+	cfg.Rotation.Enabled = dto.Rotation.Enabled
+	cfg.Rotation.Interval = parseDurationOrDefault(dto.Rotation.Interval, cfg.Rotation.Interval, 30*24*time.Hour)
+	cfg.Rotation.Grace = parseDurationOrDefault(dto.Rotation.Grace, cfg.Rotation.Grace, 5*time.Minute)
+	cfg.Rotation.ConfirmTimeout = parseDurationOrDefault(dto.Rotation.ConfirmTimeout, cfg.Rotation.ConfirmTimeout, 30*time.Second)
+	cfg.Testdata.CacheRoot = defaultString(dto.Testdata.CacheRoot, cfg.Testdata.CacheRoot)
+	cfg.Testdata.MaxCacheBytes = dto.Testdata.MaxCacheBytes
+	cfg.Testdata.MaxUnusedDuration = parseDurationOrDefault(dto.Testdata.MaxUnusedDuration, cfg.Testdata.MaxUnusedDuration, 72*time.Hour)
+	cfg.Testdata.CleanupInterval = parseDurationOrDefault(dto.Testdata.CleanupInterval, cfg.Testdata.CleanupInterval, time.Hour)
+	cfg.Testdata.StatsInterval = parseDurationOrDefault(dto.Testdata.StatsInterval, cfg.Testdata.StatsInterval, 5*time.Minute)
+	cfg.GoJudge.Endpoint = defaultString(dto.GoJudge.Endpoint, "http://127.0.0.1:5050")
+	if dto.GoJudge.AuthToken != "" {
+		cfg.GoJudge.AuthToken = dto.GoJudge.AuthToken
+	}
+	cfg.Worker.EmptyMinBackoff = parseDurationOrDefault(dto.Worker.EmptyMinBackoff, cfg.Worker.EmptyMinBackoff, 200*time.Millisecond)
+	cfg.Worker.EmptyMaxBackoff = parseDurationOrDefault(dto.Worker.EmptyMaxBackoff, cfg.Worker.EmptyMaxBackoff, 5*time.Second)
+	cfg.Worker.DrainTimeout = parseDurationOrDefault(dto.Worker.DrainTimeout, cfg.Worker.DrainTimeout, 5*time.Minute)
+	return &cfg
+}
+
+func (s *Server) configToDTO(cfg config.Config) ConfigDTO {
+	return ConfigDTO{
+		Node: NodeDTO{
+			Name:                cfg.Node.Name,
+			Type:                cfg.Node.Type,
+			MaxConcurrency:      cfg.Node.MaxConcurrency,
+			SupportedJudgeModes: cfg.Node.SupportedJudgeModes,
+		},
+		HnieOJ: HnieOJDTO{
+			BaseURL:        cfg.HnieOJ.BaseURL,
+			WSSURL:         cfg.HnieOJ.WSSURL,
+			Audience:       cfg.HnieOJ.Audience,
+			RequestTimeout: cfg.HnieOJ.RequestTimeout.String(),
+		},
+		Identity: IdentityDTO{
+			File:                cfg.Identity.File,
+			StateDir:            cfg.Identity.StateDir,
+			BootstrapConfigured: s.store.BootstrapConfigured(),
+		},
+		Rotation: RotationDTO{
+			Enabled:        cfg.Rotation.Enabled,
+			Interval:       cfg.Rotation.Interval.String(),
+			Grace:          cfg.Rotation.Grace.String(),
+			ConfirmTimeout: cfg.Rotation.ConfirmTimeout.String(),
+		},
+		Testdata: TestdataDTO{
+			CacheRoot:         cfg.Testdata.CacheRoot,
+			MaxCacheBytes:     cfg.Testdata.MaxCacheBytes,
+			MaxUnusedDuration: cfg.Testdata.MaxUnusedDuration.String(),
+			CleanupInterval:   cfg.Testdata.CleanupInterval.String(),
+			StatsInterval:     cfg.Testdata.StatsInterval.String(),
+		},
+		GoJudge: GoJudgeDTO{
+			Endpoint:            cfg.GoJudge.Endpoint,
+			AuthTokenConfigured: cfg.GoJudge.AuthToken != "",
+		},
+		Worker: WorkerDTO{
+			EmptyMinBackoff: cfg.Worker.EmptyMinBackoff.String(),
+			EmptyMaxBackoff: cfg.Worker.EmptyMaxBackoff.String(),
+			DrainTimeout:    cfg.Worker.DrainTimeout.String(),
+		},
+	}
 }
 
 func readJSON(r *http.Request, dst any) error {
@@ -634,148 +591,21 @@ func methodNotAllowed(w http.ResponseWriter) {
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
-func parseDuration(value string, fallback time.Duration) (time.Duration, error) {
+func parseDurationOrDefault(value string, fallback, def time.Duration) time.Duration {
 	if strings.TrimSpace(value) == "" {
-		return fallback, nil
+		if fallback > 0 {
+			return fallback
+		}
+		return def
 	}
-	return time.ParseDuration(value)
-}
-
-func configToDTO(cfg config.Config) ConfigDTO {
-	return ConfigDTO{
-		Node: NodeDTO{
-			Name:                cfg.Node.Name,
-			Type:                cfg.Node.Type,
-			MaxConcurrency:      cfg.Node.MaxConcurrency,
-			SupportedJudgeModes: cfg.Node.SupportedJudgeModes,
-		},
-		HnieOJ: HnieOJDTO{
-			BaseURL:        cfg.HnieOJ.BaseURL,
-			RequestTimeout: cfg.HnieOJ.RequestTimeout.String(),
-			FormalToken: FormalTokenDTO{
-				PrivateKeyConfigured: cfg.HnieOJ.FormalToken.PrivateKeyPath != "",
-				CipherAlgorithm:      cfg.HnieOJ.FormalToken.CipherAlgorithm,
-				RefreshInterval:      cfg.HnieOJ.FormalToken.RefreshInterval.String(),
-				Nacos:                nacosToDTO(cfg.HnieOJ.FormalToken.Nacos),
-			},
-			TempToken: TempTokenDTO{
-				TokenType:          cfg.HnieOJ.TempToken.TokenType,
-				NodeID:             cfg.HnieOJ.TempToken.NodeID,
-				TokenID:            cfg.HnieOJ.TempToken.TokenID,
-				ExpireTime:         cfg.HnieOJ.TempToken.ExpireTime,
-				InstanceID:         cfg.HnieOJ.TempToken.InstanceID,
-				FingerprintHash:    cfg.HnieOJ.TempToken.FingerprintHash,
-				ProofType:          cfg.HnieOJ.TempToken.ProofType,
-				InstanceConfigured: cfg.HnieOJ.TempToken.InstanceSecretPath != "",
-			},
-		},
-		RabbitMQ: RabbitMQDTO{
-			Host:                 cfg.RabbitMQ.Host,
-			Port:                 cfg.RabbitMQ.Port,
-			Username:             cfg.RabbitMQ.Username,
-			PasswordConfigured:   cfg.RabbitMQ.Password != "",
-			VirtualHost:          cfg.RabbitMQ.VirtualHost,
-			Exchange:             cfg.RabbitMQ.Exchange,
-			Queue:                cfg.RabbitMQ.Queue,
-			RoutingKey:           cfg.RabbitMQ.RoutingKey,
-			DeadLetterExchange:   cfg.RabbitMQ.DeadLetterExchange,
-			DeadLetterQueue:      cfg.RabbitMQ.DeadLetterQueue,
-			DeadLetterRoutingKey: cfg.RabbitMQ.DeadLetterRoutingKey,
-			Prefetch:             cfg.RabbitMQ.Prefetch,
-			MaxRetries:           cfg.RabbitMQ.MaxRetries,
-			RetryBackoff:         cfg.RabbitMQ.RetryBackoff.String(),
-		},
-		Testdata: TestdataDTO{
-			CacheRoot:         cfg.Testdata.CacheRoot,
-			MaxCacheBytes:     cfg.Testdata.MaxCacheBytes,
-			MaxUnusedDuration: cfg.Testdata.MaxUnusedDuration.String(),
-			CleanupInterval:   cfg.Testdata.CleanupInterval.String(),
-			StatsInterval:     cfg.Testdata.StatsInterval.String(),
-		},
-		GoJudge: GoJudgeDTO{
-			Endpoint:            cfg.GoJudge.Endpoint,
-			AuthTokenConfigured: cfg.GoJudge.AuthToken != "",
-		},
-		Reporter: ReporterDTO{Mode: cfg.Reporter.Mode, Endpoint: cfg.Reporter.Endpoint},
-		Heartbeat: HeartbeatDTO{
-			Enabled:  cfg.Heartbeat.Enabled,
-			Endpoint: cfg.Heartbeat.Endpoint,
-			Interval: cfg.Heartbeat.Interval.String(),
-		},
-		Remote: RemoteDTO{Enabled: cfg.Remote.Enabled, Nacos: nacosToDTO(cfg.Remote.Nacos)},
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		if fallback > 0 {
+			return fallback
+		}
+		return def
 	}
-}
-
-func dtoToConfig(dto ConfigDTO, base config.Config) (*config.Config, error) {
-	cfg := base
-	cfg.Node.Name = dto.Node.Name
-	cfg.Node.Type = dto.Node.Type
-	cfg.Node.MaxConcurrency = dto.Node.MaxConcurrency
-	cfg.Node.SupportedJudgeModes = dto.Node.SupportedJudgeModes
-	cfg.HnieOJ.BaseURL = dto.HnieOJ.BaseURL
-	var err error
-	if cfg.HnieOJ.RequestTimeout, err = parseDuration(dto.HnieOJ.RequestTimeout, 30*time.Second); err != nil {
-		return nil, err
-	}
-	cfg.HnieOJ.FormalToken.CipherAlgorithm = defaultString(dto.HnieOJ.FormalToken.CipherAlgorithm, "RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
-	cfg.HnieOJ.FormalToken.Nacos = dtoToNacos(dto.HnieOJ.FormalToken.Nacos)
-	if cfg.HnieOJ.FormalToken.RefreshInterval, err = parseDuration(dto.HnieOJ.FormalToken.RefreshInterval, 30*time.Second); err != nil {
-		return nil, err
-	}
-	cfg.RabbitMQ.Host = dto.RabbitMQ.Host
-	cfg.RabbitMQ.Port = dto.RabbitMQ.Port
-	cfg.RabbitMQ.Username = dto.RabbitMQ.Username
-	if dto.RabbitMQ.Password != "" {
-		cfg.RabbitMQ.Password = dto.RabbitMQ.Password
-	}
-	cfg.RabbitMQ.VirtualHost = dto.RabbitMQ.VirtualHost
-	cfg.RabbitMQ.Exchange = dto.RabbitMQ.Exchange
-	cfg.RabbitMQ.Queue = dto.RabbitMQ.Queue
-	cfg.RabbitMQ.RoutingKey = dto.RabbitMQ.RoutingKey
-	cfg.RabbitMQ.DeadLetterExchange = dto.RabbitMQ.DeadLetterExchange
-	cfg.RabbitMQ.DeadLetterQueue = dto.RabbitMQ.DeadLetterQueue
-	cfg.RabbitMQ.DeadLetterRoutingKey = dto.RabbitMQ.DeadLetterRoutingKey
-	cfg.RabbitMQ.Prefetch = dto.RabbitMQ.Prefetch
-	cfg.RabbitMQ.MaxRetries = dto.RabbitMQ.MaxRetries
-	if cfg.RabbitMQ.RetryBackoff, err = parseDuration(dto.RabbitMQ.RetryBackoff, 10*time.Second); err != nil {
-		return nil, err
-	}
-	cfg.Testdata.CacheRoot = dto.Testdata.CacheRoot
-	cfg.Testdata.MaxCacheBytes = dto.Testdata.MaxCacheBytes
-	if cfg.Testdata.MaxUnusedDuration, err = parseDuration(dto.Testdata.MaxUnusedDuration, 72*time.Hour); err != nil {
-		return nil, err
-	}
-	if cfg.Testdata.CleanupInterval, err = parseDuration(dto.Testdata.CleanupInterval, time.Hour); err != nil {
-		return nil, err
-	}
-	if cfg.Testdata.StatsInterval, err = parseDuration(dto.Testdata.StatsInterval, 5*time.Minute); err != nil {
-		return nil, err
-	}
-	cfg.GoJudge.Endpoint = defaultString(dto.GoJudge.Endpoint, "http://127.0.0.1:5050")
-	if dto.GoJudge.AuthToken != "" {
-		cfg.GoJudge.AuthToken = dto.GoJudge.AuthToken
-	}
-	cfg.Reporter.Mode = defaultString(dto.Reporter.Mode, "http")
-	cfg.Reporter.Endpoint = defaultString(dto.Reporter.Endpoint, "/judge/submissions/{submissionId}/events")
-	cfg.Heartbeat.Enabled = dto.Heartbeat.Enabled
-	cfg.Heartbeat.Endpoint = defaultString(dto.Heartbeat.Endpoint, "/judge/nodes/heartbeat")
-	if cfg.Heartbeat.Interval, err = parseDuration(dto.Heartbeat.Interval, 30*time.Second); err != nil {
-		return nil, err
-	}
-	cfg.Remote.Enabled = dto.Remote.Enabled
-	cfg.Remote.Nacos = dtoToNacos(dto.Remote.Nacos)
-	if cfg.HnieOJ.BaseURL == "" {
-		return nil, errors.New("hnieoj.baseUrl is required")
-	}
-	return &cfg, nil
-}
-
-func nacosToDTO(n config.NacosConfig) NacosDTO {
-	return NacosDTO{ServerAddr: n.ServerAddr, Namespace: n.Namespace, Group: n.Group, DataID: n.DataID}
-}
-
-func dtoToNacos(n NacosDTO) config.NacosConfig {
-	return config.NacosConfig{ServerAddr: n.ServerAddr, Namespace: n.Namespace, Group: n.Group, DataID: n.DataID}
+	return parsed
 }
 
 func defaultString(value, fallback string) string {
