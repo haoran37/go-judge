@@ -1,21 +1,15 @@
+// Package reporter 定义判题事件上报接口。最终切到 WSS 后事件与终态都走节点通道，
+// 不再存在 HTTP events 备用通路。
 package reporter
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"strings"
 
 	"github.com/criyle/go-judge/internal/hnieoj/logging"
 	"github.com/criyle/go-judge/internal/hnieoj/model"
 )
 
-type Credential interface {
-	Apply(req *http.Request)
-}
-
+// Reporter 上报任务进度与终态。终态实现必须先持久化再返回 nil。
 type Reporter interface {
 	ReportStatusChanged(context.Context, model.Event) error
 	ReportCaseFinished(context.Context, model.Event) error
@@ -57,67 +51,4 @@ func (r *LogReporter) log(message string, e model.Event) {
 		logging.String("eventType", e.EventType),
 		logging.Int("status", e.Status),
 		logging.String("message", e.Message))
-}
-
-type HTTPReporter struct {
-	baseURL    string
-	endpoint   string
-	httpClient *http.Client
-	cred       Credential
-	logger     logging.Logger
-}
-
-func NewHTTP(baseURL, endpoint string, httpClient *http.Client, cred Credential, logger logging.Logger) *HTTPReporter {
-	return &HTTPReporter{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		endpoint:   endpoint,
-		httpClient: httpClient,
-		cred:       cred,
-		logger:     logger,
-	}
-}
-
-func (r *HTTPReporter) ReportStatusChanged(ctx context.Context, e model.Event) error {
-	return r.report(ctx, e)
-}
-
-func (r *HTTPReporter) ReportCaseFinished(ctx context.Context, e model.Event) error {
-	return r.report(ctx, e)
-}
-
-func (r *HTTPReporter) ReportJudgeFinished(ctx context.Context, e model.Event) error {
-	return r.report(ctx, e)
-}
-
-func (r *HTTPReporter) ReportJudgeFailed(ctx context.Context, e model.Event) error {
-	return r.report(ctx, e)
-}
-
-func (r *HTTPReporter) report(ctx context.Context, e model.Event) error {
-	body, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
-	endpoint := strings.ReplaceAll(r.endpoint, "{submissionId}", e.SubmissionID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", fmt.Sprintf("%s:%s:%s:%d:%d", e.SubmissionID, e.JudgeTaskID, e.EventType, e.JudgedCase, e.CurrentCase))
-	r.cred.Apply(req)
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		r.logger.Warn("report failed", logging.String("submissionId", e.SubmissionID), logging.String("eventType", e.EventType), logging.Error(err))
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		err := fmt.Errorf("report status %d", resp.StatusCode)
-		r.logger.Warn("report failed", logging.String("submissionId", e.SubmissionID), logging.String("eventType", e.EventType), logging.Error(err))
-		return err
-	}
-	r.logger.Info("report succeeded", logging.String("submissionId", e.SubmissionID), logging.String("eventType", e.EventType))
-	return nil
 }

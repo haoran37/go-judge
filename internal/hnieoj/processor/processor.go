@@ -24,6 +24,9 @@ type Processor struct {
 	logger         logging.Logger
 	supportedModes map[string]struct{}
 	inFlight       sync.Map
+	// now 返回服务端校正后的时间，供授权截止判断与 WSS/签名路径保持一致；
+	// 为 nil 时退回本地时钟。
+	now func() time.Time
 }
 
 func New(testdataClient *testdata.Client, runnerClient *runner.Client, reporter reporter.Reporter, cred *auth.Credential, logger logging.Logger, supportedModes []string) *Processor {
@@ -34,7 +37,23 @@ func New(testdataClient *testdata.Client, runnerClient *runner.Client, reporter 
 		cred:           cred,
 		logger:         logger,
 		supportedModes: supportedModeSet(supportedModes),
+		now:            time.Now,
 	}
+}
+
+// SetNow 注入服务端校正后的时钟；授权到期判断必须与 WSS ServerNow 使用同一时间源。
+func (p *Processor) SetNow(now func() time.Time) {
+	if now != nil {
+		p.now = now
+	}
+}
+
+// nowTime 返回授权判断使用的时间；未注入时为本地时钟。
+func (p *Processor) nowTime() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
 
 func (p *Processor) Process(ctx context.Context, task model.Task) error {
@@ -44,8 +63,11 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 	if task.JudgeTaskID == "" {
 		return ErrNonRetryable{Err: fmt.Errorf("judgeTaskId is required")}
 	}
-	if p.cred.Expired(time.Now()) {
-		return ErrRetryable{Err: fmt.Errorf("temporary credential expired")}
+	if p.cred.Revoked() {
+		return ErrNonRetryable{Err: fmt.Errorf("judge node credential revoked")}
+	}
+	if p.cred.Expired(p.nowTime()) {
+		return ErrRetryable{Err: fmt.Errorf("judge node credential expired")}
 	}
 	key := taskKey(task)
 	if _, loaded := p.inFlight.LoadOrStore(key, struct{}{}); loaded {
@@ -62,7 +84,7 @@ func (p *Processor) Process(ctx context.Context, task model.Task) error {
 		return err
 	}
 
-	cases, _, err := p.testdataClient.Ensure(ctx, task.ProblemID, task.DataVersion)
+	cases, _, err := p.testdataClient.Ensure(ctx, task)
 	if err != nil {
 		var permanent testdata.ErrPermanent
 		if errors.As(err, &permanent) {

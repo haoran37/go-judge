@@ -1,37 +1,22 @@
+// Package heartbeat 构造 WSS HEARTBEAT 的 payload（现有指标 + draining）。
+// 心跳不再走 HTTP，也不改变服务端批准额度或硬授权。
 package heartbeat
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"net/http"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/criyle/go-judge/internal/hnieoj/auth"
 	"github.com/criyle/go-judge/internal/hnieoj/config"
-	"github.com/criyle/go-judge/internal/hnieoj/logging"
 )
 
-const Version = "hnieoj-go-judge-0.1.0"
+// Version 是节点 agent 版本，随心跳上报。
+const Version = "hnieoj-go-judge-0.3.0"
 
 const defaultCacheStatsInterval = 5 * time.Minute
 
-type Client struct {
-	cfg          config.Config
-	cred         *auth.Credential
-	httpClient   *http.Client
-	logger       logging.Logger
-	running      *atomic.Int64
-	cacheMu      sync.Mutex
-	cacheStats   CacheStats
-	cacheStatsAt time.Time
-}
-
+// Payload 是 HEARTBEAT 的业务字段。
 type Payload struct {
 	NodeID              string   `json:"nodeId"`
 	NodeName            string   `json:"nodeName"`
@@ -41,104 +26,73 @@ type Payload struct {
 	CPUCore             int      `json:"cpuCore"`
 	Version             string   `json:"version"`
 	SupportedJudgeModes []string `json:"supportedJudgeModes"`
+	Draining            bool     `json:"draining"`
 	CacheUsedBytes      int64    `json:"cacheUsedBytes"`
 	CacheProblemCount   int      `json:"cacheProblemCount"`
 	DiskTotalBytes      int64    `json:"diskTotalBytes"`
 	DiskFreeBytes       int64    `json:"diskFreeBytes"`
 }
 
-func New(cfg config.Config, cred *auth.Credential, httpClient *http.Client, logger logging.Logger, running *atomic.Int64) *Client {
-	return &Client{cfg: cfg, cred: cred, httpClient: httpClient, logger: logger, running: running}
+// Builder 收集节点指标并生成 payload。
+type Builder struct {
+	cfg          config.Config
+	running      atomicInt64
+	nodeID       func() string
+	cacheMu      sync.Mutex
+	cacheStats   CacheStats
+	cacheStatsAt time.Time
 }
 
-func (c *Client) Start(ctx context.Context) {
-	if !c.cfg.Heartbeat.Enabled {
-		return
-	}
-	interval := c.cfg.Heartbeat.Interval
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	go func() {
-		defer ticker.Stop()
-		for {
-			if err := c.Send(ctx); err != nil {
-				c.logger.Warn("heartbeat failed", logging.Error(err))
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+// atomicInt64 收敛对 atomic.Int64 的依赖，便于测试注入。
+type atomicInt64 interface {
+	Load() int64
+}
+
+func NewBuilder(cfg config.Config, running atomicInt64, nodeID func() string) *Builder {
+	return &Builder{cfg: cfg, running: running, nodeID: nodeID}
+}
+
+// Payload 生成带有 draining 标记的 HEARTBEAT payload。
+func (b *Builder) Payload(draining bool) (json.RawMessage, error) {
+	nodeID := b.cfg.Node.Name
+	if b.nodeID != nil {
+		if id := b.nodeID(); id != "" {
+			nodeID = id
 		}
-	}()
-}
-
-func (c *Client) Send(ctx context.Context) error {
-	nodeID := c.cred.NodeID
-	if nodeID == "" {
-		nodeID = c.cfg.Node.Name
 	}
-	cacheStats := c.cacheStatsSnapshot()
-	body, err := json.Marshal(Payload{
+	var running int64
+	if b.running != nil {
+		running = b.running.Load()
+	}
+	cacheStats := b.cacheStatsSnapshot()
+	return json.Marshal(Payload{
 		NodeID:              nodeID,
-		NodeName:            c.cfg.Node.Name,
-		NodeType:            c.cfg.Node.Type,
-		MaxConcurrency:      c.cfg.Node.MaxConcurrency,
-		RunningTasks:        c.running.Load(),
+		NodeName:            b.cfg.Node.Name,
+		NodeType:            b.cfg.Node.Type,
+		MaxConcurrency:      b.cfg.Node.MaxConcurrency,
+		RunningTasks:        running,
 		CPUCore:             runtime.NumCPU(),
 		Version:             Version,
-		SupportedJudgeModes: c.cfg.Node.SupportedJudgeModes,
+		SupportedJudgeModes: b.cfg.Node.SupportedJudgeModes,
+		Draining:            draining,
 		CacheUsedBytes:      cacheStats.CacheUsedBytes,
 		CacheProblemCount:   cacheStats.CacheProblemCount,
 		DiskTotalBytes:      cacheStats.DiskTotalBytes,
 		DiskFreeBytes:       cacheStats.DiskFreeBytes,
 	})
-	if err != nil {
-		return err
-	}
-	endpoint := c.cfg.Heartbeat.Endpoint
-	if endpoint == "" {
-		endpoint = "/judge/nodes/heartbeat"
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.HnieOJ.BaseURL, "/")+endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	c.cred.Apply(req)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &statusError{code: resp.StatusCode}
-	}
-	c.logger.Info("heartbeat succeeded")
-	return nil
 }
 
-func (c *Client) cacheStatsSnapshot() CacheStats {
-	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
-	interval := c.cfg.Testdata.StatsInterval
+func (b *Builder) cacheStatsSnapshot() CacheStats {
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	interval := b.cfg.Testdata.StatsInterval
 	if interval <= 0 {
 		interval = defaultCacheStatsInterval
 	}
-	if !c.cacheStatsAt.IsZero() && time.Since(c.cacheStatsAt) < interval {
-		return c.cacheStats
+	if !b.cacheStatsAt.IsZero() && time.Since(b.cacheStatsAt) < interval {
+		return b.cacheStats
 	}
-	c.cacheStats = collectCacheStats(c.cfg.Testdata.CacheRoot)
-	c.cacheStatsAt = time.Now()
-	return c.cacheStats
-}
-
-type statusError struct {
-	code int
-}
-
-func (e *statusError) Error() string {
-	return "heartbeat status " + strconv.Itoa(e.code)
+	b.cacheStats = collectCacheStats(b.cfg.Testdata.CacheRoot)
+	b.cacheStatsAt = time.Now()
+	return b.cacheStats
 }
