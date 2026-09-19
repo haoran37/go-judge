@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 const (
 	StatusPending             = -10
@@ -57,6 +60,19 @@ type Task struct {
 	DataVersion      int64              `json:"dataVersion"`
 	ContestID        int64              `json:"contestId"`
 	CreatedAt        time.Time          `json:"createdAt"`
+	// AttemptID 由 claim 响应注入，随任务生命周期用于租约、测试数据与事件上报。
+	AttemptID string `json:"attemptId,omitempty"`
+}
+
+// Assignment 是 WSS 任务通道下发给 worker 的一次任务分配。
+// Ctx 由任务通道持有，TASK_CANCEL/epoch fence 会取消它；不参与 JSON。
+type Assignment struct {
+	Task             Task            `json:"task"`
+	AttemptID        string          `json:"attemptId"`
+	LeaseUntil       int64           `json:"leaseUntil"`
+	RenewAfterMillis int             `json:"renewAfterMillis"`
+	Completed        bool            `json:"completed,omitempty"`
+	Ctx              context.Context `json:"-"`
 }
 
 type Program struct {
@@ -95,15 +111,17 @@ type CaseResult struct {
 }
 
 type Event struct {
-	EventType         string      `json:"eventType"`
-	SubmissionID      string      `json:"submissionId"`
-	JudgeTaskID       string      `json:"judgeTaskId"`
-	Status            int         `json:"status"`
-	StatusText        string      `json:"statusText"`
-	TotalCase         int         `json:"totalCase"`
-	JudgedCase        int         `json:"judgedCase"`
-	CurrentCase       int         `json:"currentCase"`
-	Score             int         `json:"score,omitempty"`
+	EventType    string `json:"eventType"`
+	SubmissionID string `json:"submissionId"`
+	JudgeTaskID  string `json:"judgeTaskId"`
+	AttemptID    string `json:"attemptId,omitempty"`
+	Status       int    `json:"status"`
+	StatusText   string `json:"statusText"`
+	TotalCase    int    `json:"totalCase"`
+	JudgedCase   int    `json:"judgedCase"`
+	CurrentCase  int    `json:"currentCase"`
+	// score 不使用 omitempty：Java 终态 JUDGE_FINISHED 要求非空 score，包含 WA/TLE/CE 的 0 分。
+	Score             int         `json:"score"`
 	CaseResult        *CaseResult `json:"caseResult,omitempty"`
 	Message           string      `json:"message"`
 	DiagnosticMessage string      `json:"diagnosticMessage,omitempty"`
@@ -146,6 +164,7 @@ func NewEvent(eventType string, task Task, status, totalCase, judgedCase, curren
 		EventType:    eventType,
 		SubmissionID: task.SubmissionID,
 		JudgeTaskID:  task.JudgeTaskID,
+		AttemptID:    task.AttemptID,
 		Status:       status,
 		StatusText:   StatusText(status),
 		TotalCase:    totalCase,
