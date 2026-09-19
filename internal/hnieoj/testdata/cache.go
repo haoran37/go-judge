@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/criyle/go-judge/internal/hnieoj/httpsign"
 	"github.com/criyle/go-judge/internal/hnieoj/logging"
 	"github.com/criyle/go-judge/internal/hnieoj/model"
 )
@@ -30,48 +32,59 @@ func (e ErrPermanent) Unwrap() error {
 	return e.Err
 }
 
-type Credential interface {
-	Apply(req *http.Request)
+// Signer 是签名 HTTPS 传输（测试数据下载必须带合同签名与任务绑定）。
+type Signer interface {
+	Do(ctx context.Context, method, rawURL string, body []byte, extraHeaders map[string]string) (*http.Response, error)
 }
 
 type Client struct {
-	baseURL    string
-	cacheRoot  string
-	httpClient *http.Client
-	cred       Credential
-	logger     logging.Logger
-	mu         sync.Mutex
+	baseURL   string
+	cacheRoot string
+	signer    Signer
+	logger    logging.Logger
+	mu        sync.Mutex
 }
 
-func New(baseURL, cacheRoot string, httpClient *http.Client, cred Credential, logger logging.Logger) *Client {
+func New(baseURL, cacheRoot string, signer *httpsign.Signer, logger logging.Logger) *Client {
 	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		cacheRoot:  cacheRoot,
-		httpClient: httpClient,
-		cred:       cred,
-		logger:     logger,
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		cacheRoot: cacheRoot,
+		signer:    signer,
+		logger:    logger,
 	}
 }
 
-func (c *Client) Ensure(ctx context.Context, problemID, expectedVersion int64) ([]model.Case, int64, error) {
+func (c *Client) Ensure(ctx context.Context, task model.Task) ([]model.Case, int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	problemID := task.ProblemID
 	problemRoot := filepath.Join(c.cacheRoot, "problems", strconv.FormatInt(problemID, 10))
 	testdataDir := filepath.Join(problemRoot, "testdata")
 	versionFile := filepath.Join(problemRoot, "data-version")
 	localVersion := readVersion(versionFile)
 
-	reqURL := fmt.Sprintf("%s/judge/problems/%d/testdata", c.baseURL, problemID)
+	values := url.Values{}
 	if localVersion > 0 {
-		reqURL += "?version=" + strconv.FormatInt(localVersion, 10)
+		values.Set("version", strconv.FormatInt(localVersion, 10))
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, 0, err
+	// 首次下载必须携带任务资格字段，后端会校验身份、租约与 problemId 绑定。
+	if task.SubmissionID != "" {
+		values.Set("submissionId", task.SubmissionID)
 	}
-	c.cred.Apply(req)
-	resp, err := c.httpClient.Do(req)
+	if task.JudgeTaskID != "" {
+		values.Set("judgeTaskId", task.JudgeTaskID)
+	}
+	if task.AttemptID != "" {
+		values.Set("attemptId", task.AttemptID)
+	}
+	reqURL := fmt.Sprintf("%s/judge/problems/%d/testdata", c.baseURL, problemID)
+	if encoded := values.Encode(); encoded != "" {
+		reqURL += "?" + encoded
+	}
+	// 首次下载必须携带任务资格字段，后端会校验身份、租约与 problemId 绑定。
+	// 请求由 httpsign 附加 Bearer 与 Ed25519 签名，签名覆盖 raw path+query。
+	resp, err := c.signer.Do(ctx, http.MethodGet, reqURL, nil, nil)
 	if err != nil {
 		return nil, 0, err
 	}
