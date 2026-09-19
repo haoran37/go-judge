@@ -1,11 +1,9 @@
 package config
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -15,15 +13,19 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
+// Config 是判题节点 agent 的完整运行配置。
+// 身份与任务通道：本地 Ed25519 身份 + 一次性 Bootstrap + WSS；
+// HTTPS 只用于入网、签名测试数据下载与密钥轮换。不再有 RabbitMQ/Nacos/shared token。
 type Config struct {
 	Node      NodeConfig      `yaml:"node"`
 	HnieOJ    HnieOJConfig    `yaml:"hnieoj"`
-	RabbitMQ  RabbitMQConfig  `yaml:"rabbitmq"`
+	Identity  IdentityConfig  `yaml:"identity"`
+	Bootstrap BootstrapConfig `yaml:"bootstrap"`
+	WSS       WSSConfig       `yaml:"wss"`
+	Rotation  RotationConfig  `yaml:"rotation"`
 	Testdata  TestdataConfig  `yaml:"testdata"`
 	GoJudge   GoJudgeConfig   `yaml:"gojudge"`
-	Reporter  ReporterConfig  `yaml:"reporter"`
-	Heartbeat HeartbeatConfig `yaml:"heartbeat"`
-	Remote    RemoteConfig    `yaml:"remoteConfig"`
+	Worker    WorkerConfig    `yaml:"worker"`
 }
 
 type NodeConfig struct {
@@ -34,55 +36,51 @@ type NodeConfig struct {
 }
 
 type HnieOJConfig struct {
-	BaseURL        string        `yaml:"baseUrl"`
+	BaseURL string `yaml:"baseUrl"`
+	// WSSURL 为任务通道地址；留空时由 baseUrl 推导 wss://host/ws/judge/node。
+	WSSURL string `yaml:"wssUrl"`
+	// Audience 应与服务端配置一致；AUTH_OK 的 audience 由 challenge 下发并为准。
+	Audience       string        `yaml:"audience"`
 	RequestTimeout time.Duration `yaml:"requestTimeout"`
-	FormalToken    FormalToken   `yaml:"formalToken"`
-	TempToken      TempToken     `yaml:"tempToken"`
 }
 
-type FormalToken struct {
-	EncryptedToken  string        `yaml:"encryptedToken"`
-	PrivateKeyPath  string        `yaml:"privateKeyPath"`
-	CipherAlgorithm string        `yaml:"cipherAlgorithm"`
-	Nacos           NacosConfig   `yaml:"nacos"`
-	RefreshInterval time.Duration `yaml:"refreshInterval"`
+// IdentityConfig 指定本地长期身份文件。私钥只在此文件，永不外发。
+type IdentityConfig struct {
+	File string `yaml:"file"`
+	// StateDir 保存结果队列等运行期安全状态。
+	StateDir string `yaml:"stateDir"`
 }
 
-type NacosConfig struct {
-	ServerAddr string `yaml:"serverAddr"`
-	Namespace  string `yaml:"namespace"`
-	Group      string `yaml:"group"`
-	DataID     string `yaml:"dataId"`
+// BootstrapConfig 是一次性入网凭证来源；注册成功后文件被删除。
+type BootstrapConfig struct {
+	TokenFile string `yaml:"tokenFile"`
+	Token     string `yaml:"token"`
 }
 
-type TempToken struct {
-	AuthCode           string `yaml:"authCode"`
-	JWT                string `yaml:"jwt"`
-	TokenType          string `yaml:"tokenType"`
-	NodeID             string `yaml:"nodeId"`
-	TokenID            string `yaml:"tokenId"`
-	ExpireTime         string `yaml:"expireTime"`
-	InstanceID         string `yaml:"instanceId"`
-	InstanceSecretPath string `yaml:"instanceSecretPath"`
-	FingerprintHash    string `yaml:"fingerprintHash"`
-	ProofType          string `yaml:"proofType"`
+// WSSConfig 控制任务通道边界；所有值都有正的上界。
+type WSSConfig struct {
+	ControlFrameBytes    int           `yaml:"controlFrameBytes"`
+	TaskFrameBytes       int           `yaml:"taskFrameBytes"`
+	AuthDeadline         time.Duration `yaml:"authDeadline"`
+	RequestTimeout       time.Duration `yaml:"requestTimeout"`
+	ConnectMinBackoff    time.Duration `yaml:"connectMinBackoff"`
+	ConnectMaxBackoff    time.Duration `yaml:"connectMaxBackoff"`
+	HeartbeatInterval    time.Duration `yaml:"heartbeatInterval"`
+	WriteTimeout         time.Duration `yaml:"writeTimeout"`
+	ResultQueueDir       string        `yaml:"resultQueueDir"`
+	ResultMaxRecords     int           `yaml:"resultMaxRecords"`
+	ResultMaxBytes       int64         `yaml:"resultMaxBytes"`
+	ResultMaxRecordBytes int64         `yaml:"resultMaxRecordBytes"`
+	ResultTTL            time.Duration `yaml:"resultTtl"`
+	ResultRetryBackoff   time.Duration `yaml:"resultRetryBackoff"`
 }
 
-type RabbitMQConfig struct {
-	Host                 string        `yaml:"host"`
-	Port                 int           `yaml:"port"`
-	Username             string        `yaml:"username"`
-	Password             string        `yaml:"password"`
-	VirtualHost          string        `yaml:"virtualHost"`
-	Exchange             string        `yaml:"exchange"`
-	Queue                string        `yaml:"queue"`
-	RoutingKey           string        `yaml:"routingKey"`
-	DeadLetterExchange   string        `yaml:"deadLetterExchange"`
-	DeadLetterQueue      string        `yaml:"deadLetterQueue"`
-	DeadLetterRoutingKey string        `yaml:"deadLetterRoutingKey"`
-	Prefetch             int           `yaml:"prefetch"`
-	MaxRetries           int           `yaml:"maxRetries"`
-	RetryBackoff         time.Duration `yaml:"retryBackoff"`
+// RotationConfig 控制自动密钥轮换；默认 30 天，测试可注入短周期。
+type RotationConfig struct {
+	Enabled        bool          `yaml:"enabled"`
+	Interval       time.Duration `yaml:"interval"`
+	Grace          time.Duration `yaml:"grace"`
+	ConfirmTimeout time.Duration `yaml:"confirmTimeout"`
 }
 
 type TestdataConfig struct {
@@ -98,20 +96,11 @@ type GoJudgeConfig struct {
 	AuthToken string `yaml:"authToken"`
 }
 
-type ReporterConfig struct {
-	Mode     string `yaml:"mode"`
-	Endpoint string `yaml:"endpoint"`
-}
-
-type HeartbeatConfig struct {
-	Enabled  bool          `yaml:"enabled"`
-	Endpoint string        `yaml:"endpoint"`
-	Interval time.Duration `yaml:"interval"`
-}
-
-type RemoteConfig struct {
-	Enabled bool        `yaml:"enabled"`
-	Nacos   NacosConfig `yaml:"nacos"`
+// WorkerConfig 控制有界槽位执行与优雅排空。
+type WorkerConfig struct {
+	EmptyMinBackoff time.Duration `yaml:"emptyMinBackoff"`
+	EmptyMaxBackoff time.Duration `yaml:"emptyMaxBackoff"`
+	DrainTimeout    time.Duration `yaml:"drainTimeout"`
 }
 
 func Load(path string) (*Config, error) {
@@ -126,11 +115,12 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	applyEnv(cfg)
-	if err := applyRemoteConfig(context.Background(), cfg); err != nil {
-		return nil, err
-	}
-	applyEnv(cfg)
 	return cfg, cfg.Validate()
+}
+
+// Default 返回带默认值的配置，供 WebUI 首次进入配置页时使用。
+func Default() *Config {
+	return defaultConfig()
 }
 
 func defaultConfig() *Config {
@@ -142,34 +132,33 @@ func defaultConfig() *Config {
 			SupportedJudgeModes: []string{"default"},
 		},
 		HnieOJ: HnieOJConfig{
+			BaseURL:        "https://oj.example.com",
 			RequestTimeout: 30 * time.Second,
-			FormalToken: FormalToken{
-				CipherAlgorithm: "RSA/ECB/OAEPWithSHA-256AndMGF1Padding",
-				PrivateKeyPath:  "/etc/hnieoj/judge-security/judge_formal_private.pem",
-				RefreshInterval: 30 * time.Second,
-				Nacos: NacosConfig{
-					ServerAddr: "http://127.0.0.1:8848",
-					Namespace:  "dev",
-					Group:      "HNIEOJ_SECRET_GROUP",
-					DataID:     "hnieoj-judge-formal-token.yaml",
-				},
-			},
 		},
-		RabbitMQ: RabbitMQConfig{
-			Host:                 "127.0.0.1",
-			Port:                 5672,
-			Username:             "guest",
-			Password:             "guest",
-			VirtualHost:          "/",
-			Exchange:             "hnieoj.judge.exchange",
-			Queue:                "hnieoj.judge.task",
-			RoutingKey:           "judge.submission.created",
-			DeadLetterExchange:   "hnieoj.judge.dlx",
-			DeadLetterQueue:      "hnieoj.judge.task.dlq",
-			DeadLetterRoutingKey: "judge.submission.created.dlq",
-			Prefetch:             1,
-			MaxRetries:           3,
-			RetryBackoff:         10 * time.Second,
+		Identity: IdentityConfig{
+			File:     "/var/lib/hnieoj-judge-node/identity.json",
+			StateDir: "/var/lib/hnieoj-judge-node",
+		},
+		WSS: WSSConfig{
+			ControlFrameBytes:    64 * 1024,
+			TaskFrameBytes:       4 * 1024 * 1024,
+			AuthDeadline:         10 * time.Second,
+			RequestTimeout:       30 * time.Second,
+			ConnectMinBackoff:    500 * time.Millisecond,
+			ConnectMaxBackoff:    30 * time.Second,
+			HeartbeatInterval:    30 * time.Second,
+			WriteTimeout:         10 * time.Second,
+			ResultMaxRecords:     256,
+			ResultMaxBytes:       64 * 1024 * 1024,
+			ResultMaxRecordBytes: 4 * 1024 * 1024,
+			ResultTTL:            72 * time.Hour,
+			ResultRetryBackoff:   2 * time.Second,
+		},
+		Rotation: RotationConfig{
+			Enabled:        true,
+			Interval:       30 * 24 * time.Hour,
+			Grace:          5 * time.Minute,
+			ConfirmTimeout: 30 * time.Second,
 		},
 		Testdata: TestdataConfig{
 			CacheRoot:         "/data/oj/judge-cache",
@@ -181,29 +170,12 @@ func defaultConfig() *Config {
 		GoJudge: GoJudgeConfig{
 			Endpoint: "http://127.0.0.1:5050",
 		},
-		Reporter: ReporterConfig{
-			Mode:     "http",
-			Endpoint: "/judge/submissions/{submissionId}/events",
-		},
-		Heartbeat: HeartbeatConfig{
-			Enabled:  false,
-			Endpoint: "/judge/nodes/heartbeat",
-			Interval: 30 * time.Second,
-		},
-		Remote: RemoteConfig{
-			Enabled: false,
-			Nacos: NacosConfig{
-				ServerAddr: "http://127.0.0.1:8848",
-				Namespace:  "dev",
-				Group:      "HNIEOJ_JUDGE_GROUP",
-				DataID:     "hnieoj-judge-node.yaml",
-			},
+		Worker: WorkerConfig{
+			EmptyMinBackoff: 200 * time.Millisecond,
+			EmptyMaxBackoff: 5 * time.Second,
+			DrainTimeout:    5 * time.Minute,
 		},
 	}
-}
-
-func Default() *Config {
-	return defaultConfig()
 }
 
 func (c *Config) Validate() error {
@@ -224,6 +196,85 @@ func (c *Config) Validate() error {
 	if c.HnieOJ.BaseURL == "" {
 		return errors.New("hnieoj.baseUrl is required")
 	}
+	if err := ValidateBackendURL(c.HnieOJ.BaseURL); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.HnieOJ.WSSURL) == "" {
+		derived, err := DeriveWSSURL(c.HnieOJ.BaseURL)
+		if err != nil {
+			return err
+		}
+		c.HnieOJ.WSSURL = derived
+	}
+	if err := ValidateWSSURL(c.HnieOJ.WSSURL); err != nil {
+		return err
+	}
+	if c.HnieOJ.RequestTimeout <= 0 {
+		c.HnieOJ.RequestTimeout = 30 * time.Second
+	}
+	if strings.TrimSpace(c.Identity.File) == "" {
+		return errors.New("identity.file is required")
+	}
+	if strings.TrimSpace(c.Identity.StateDir) == "" {
+		return errors.New("identity.stateDir is required")
+	}
+	if c.WSS.ControlFrameBytes <= 0 {
+		c.WSS.ControlFrameBytes = 64 * 1024
+	}
+	if c.WSS.ControlFrameBytes > 64*1024*1024 {
+		return errors.New("wss.controlFrameBytes exceeds hard limit")
+	}
+	if c.WSS.TaskFrameBytes <= 0 {
+		c.WSS.TaskFrameBytes = 4 * 1024 * 1024
+	}
+	if c.WSS.TaskFrameBytes > 64*1024*1024 {
+		return errors.New("wss.taskFrameBytes exceeds hard limit")
+	}
+	if c.WSS.AuthDeadline <= 0 {
+		c.WSS.AuthDeadline = 10 * time.Second
+	}
+	if c.WSS.RequestTimeout <= 0 {
+		c.WSS.RequestTimeout = 30 * time.Second
+	}
+	if c.WSS.ConnectMinBackoff <= 0 {
+		c.WSS.ConnectMinBackoff = 500 * time.Millisecond
+	}
+	if c.WSS.ConnectMaxBackoff < c.WSS.ConnectMinBackoff {
+		c.WSS.ConnectMaxBackoff = 30 * time.Second
+	}
+	if c.WSS.HeartbeatInterval <= 0 {
+		c.WSS.HeartbeatInterval = 30 * time.Second
+	}
+	if c.WSS.WriteTimeout <= 0 {
+		c.WSS.WriteTimeout = 10 * time.Second
+	}
+	if c.WSS.ResultMaxRecords <= 0 {
+		c.WSS.ResultMaxRecords = 256
+	}
+	if c.WSS.ResultMaxBytes <= 0 {
+		c.WSS.ResultMaxBytes = 64 * 1024 * 1024
+	}
+	if c.WSS.ResultMaxRecordBytes <= 0 {
+		c.WSS.ResultMaxRecordBytes = 4 * 1024 * 1024
+	}
+	if c.WSS.ResultTTL < 0 {
+		return errors.New("wss.resultTtl must not be negative")
+	}
+	if c.WSS.ResultRetryBackoff <= 0 {
+		c.WSS.ResultRetryBackoff = 2 * time.Second
+	}
+	if c.WSS.ResultQueueDir == "" {
+		c.WSS.ResultQueueDir = c.Identity.StateDir + "/results"
+	}
+	if c.Rotation.Interval <= 0 {
+		c.Rotation.Interval = 30 * 24 * time.Hour
+	}
+	if c.Rotation.Grace <= 0 {
+		c.Rotation.Grace = 5 * time.Minute
+	}
+	if c.Rotation.ConfirmTimeout <= 0 {
+		c.Rotation.ConfirmTimeout = 30 * time.Second
+	}
 	if c.GoJudge.Endpoint == "" {
 		return errors.New("gojudge.endpoint is required")
 	}
@@ -242,23 +293,85 @@ func (c *Config) Validate() error {
 	if c.Testdata.StatsInterval <= 0 {
 		c.Testdata.StatsInterval = 5 * time.Minute
 	}
-	if c.RabbitMQ.Prefetch <= 0 {
-		c.RabbitMQ.Prefetch = c.Node.MaxConcurrency
+	if c.Worker.EmptyMinBackoff <= 0 {
+		c.Worker.EmptyMinBackoff = 200 * time.Millisecond
 	}
-	if c.RabbitMQ.MaxRetries < 0 {
-		c.RabbitMQ.MaxRetries = 0
+	if c.Worker.EmptyMaxBackoff < c.Worker.EmptyMinBackoff {
+		c.Worker.EmptyMaxBackoff = 5 * time.Second
 	}
-	if c.RabbitMQ.RetryBackoff <= 0 {
-		c.RabbitMQ.RetryBackoff = 10 * time.Second
-	}
-	c.HnieOJ.TempToken.ProofType = strings.TrimSpace(c.HnieOJ.TempToken.ProofType)
-	if c.HnieOJ.TempToken.ProofType == "" {
-		c.HnieOJ.TempToken.ProofType = "ed25519"
-	}
-	if c.HnieOJ.TempToken.ProofType != "ed25519" {
-		return fmt.Errorf("unsupported hnieoj.tempToken.proofType %q", c.HnieOJ.TempToken.ProofType)
+	if c.Worker.DrainTimeout <= 0 {
+		c.Worker.DrainTimeout = 5 * time.Minute
 	}
 	return nil
+}
+
+// DeriveWSSURL 由 baseUrl 推导 wss 任务通道地址。
+func DeriveWSSURL(baseURL string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return "", err
+	}
+	scheme := "wss"
+	if strings.EqualFold(u.Scheme, "http") {
+		scheme = "ws"
+	}
+	return scheme + "://" + u.Host + "/ws/judge/node", nil
+}
+
+// ValidateBackendURL 要求远程后端必须使用 HTTPS；只有显式回环地址才允许明文 HTTP 用于本地开发。
+// 不允许关闭证书校验，也不提供任何 skip-cert 开关。
+func ValidateBackendURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("hnieoj.baseUrl is invalid: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("hnieoj.baseUrl must be an absolute URL, got %q", raw)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("hnieoj.baseUrl must use https for non-loopback hosts, got %q", raw)
+	default:
+		return fmt.Errorf("hnieoj.baseUrl must use http or https, got %q", raw)
+	}
+}
+
+// ValidateWSSURL 要求远程必须 wss；ws 只允许显式 loopback 开发地址。
+func ValidateWSSURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("hnieoj.wssUrl is invalid: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("hnieoj.wssUrl must be an absolute URL, got %q", raw)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss", "https":
+		return nil
+	case "ws", "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("hnieoj.wssUrl must use wss for non-loopback hosts, got %q", raw)
+	default:
+		return fmt.Errorf("hnieoj.wssUrl must use ws or wss, got %q", raw)
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func applyEnv(c *Config) {
@@ -267,38 +380,31 @@ func applyEnv(c *Config) {
 	setInt(&c.Node.MaxConcurrency, "HNIEOJ_NODE_MAX_CONCURRENCY")
 	setStringSlice(&c.Node.SupportedJudgeModes, "HNIEOJ_NODE_SUPPORTED_JUDGE_MODES")
 	setString(&c.HnieOJ.BaseURL, "HNIEOJ_BASE_URL")
+	setString(&c.HnieOJ.WSSURL, "HNIEOJ_WSS_URL")
+	setString(&c.HnieOJ.Audience, "HNIEOJ_AUDIENCE")
 	setDuration(&c.HnieOJ.RequestTimeout, "HNIEOJ_REQUEST_TIMEOUT")
-	setString(&c.HnieOJ.FormalToken.EncryptedToken, "HNIEOJ_FORMAL_ENCRYPTED_TOKEN")
-	setString(&c.HnieOJ.FormalToken.PrivateKeyPath, "HNIEOJ_FORMAL_PRIVATE_KEY_PATH")
-	setDuration(&c.HnieOJ.FormalToken.RefreshInterval, "HNIEOJ_FORMAL_TOKEN_REFRESH_INTERVAL")
-	setString(&c.HnieOJ.FormalToken.Nacos.ServerAddr, "HNIEOJ_NACOS_SERVER_ADDR")
-	setString(&c.HnieOJ.FormalToken.Nacos.Namespace, "HNIEOJ_NACOS_NAMESPACE")
-	setString(&c.HnieOJ.FormalToken.Nacos.Group, "HNIEOJ_FORMAL_TOKEN_NACOS_GROUP")
-	setString(&c.HnieOJ.FormalToken.Nacos.DataID, "HNIEOJ_FORMAL_TOKEN_NACOS_DATA_ID")
-	setString(&c.HnieOJ.TempToken.AuthCode, "HNIEOJ_TEMP_AUTH_CODE")
-	setString(&c.HnieOJ.TempToken.JWT, "HNIEOJ_TEMP_JWT")
-	setString(&c.HnieOJ.TempToken.TokenType, "HNIEOJ_TEMP_TOKEN_TYPE")
-	setString(&c.HnieOJ.TempToken.NodeID, "HNIEOJ_TEMP_NODE_ID")
-	setString(&c.HnieOJ.TempToken.TokenID, "HNIEOJ_TEMP_TOKEN_ID")
-	setString(&c.HnieOJ.TempToken.ExpireTime, "HNIEOJ_TEMP_EXPIRE_TIME")
-	setString(&c.HnieOJ.TempToken.InstanceID, "HNIEOJ_TEMP_INSTANCE_ID")
-	setString(&c.HnieOJ.TempToken.InstanceSecretPath, "HNIEOJ_TEMP_INSTANCE_SECRET_PATH")
-	setString(&c.HnieOJ.TempToken.FingerprintHash, "HNIEOJ_TEMP_FINGERPRINT_HASH")
-	setString(&c.HnieOJ.TempToken.ProofType, "HNIEOJ_TEMP_PROOF_TYPE")
-	setString(&c.RabbitMQ.Host, "HNIEOJ_RABBITMQ_HOST")
-	setInt(&c.RabbitMQ.Port, "HNIEOJ_RABBITMQ_PORT")
-	setString(&c.RabbitMQ.Username, "HNIEOJ_RABBITMQ_USERNAME")
-	setString(&c.RabbitMQ.Password, "HNIEOJ_RABBITMQ_PASSWORD")
-	setString(&c.RabbitMQ.VirtualHost, "HNIEOJ_RABBITMQ_VHOST")
-	setString(&c.RabbitMQ.Exchange, "HNIEOJ_RABBITMQ_EXCHANGE")
-	setString(&c.RabbitMQ.Queue, "HNIEOJ_RABBITMQ_QUEUE")
-	setString(&c.RabbitMQ.RoutingKey, "HNIEOJ_RABBITMQ_ROUTING_KEY")
-	setString(&c.RabbitMQ.DeadLetterExchange, "HNIEOJ_RABBITMQ_DLX")
-	setString(&c.RabbitMQ.DeadLetterQueue, "HNIEOJ_RABBITMQ_DLQ")
-	setString(&c.RabbitMQ.DeadLetterRoutingKey, "HNIEOJ_RABBITMQ_DLX_ROUTING_KEY")
-	setInt(&c.RabbitMQ.Prefetch, "HNIEOJ_RABBITMQ_PREFETCH")
-	setInt(&c.RabbitMQ.MaxRetries, "HNIEOJ_RABBITMQ_MAX_RETRIES")
-	setDuration(&c.RabbitMQ.RetryBackoff, "HNIEOJ_RABBITMQ_RETRY_BACKOFF")
+	setString(&c.Identity.File, "HNIEOJ_IDENTITY_FILE")
+	setString(&c.Identity.StateDir, "HNIEOJ_STATE_DIR")
+	setString(&c.Bootstrap.TokenFile, "HNIEOJ_BOOTSTRAP_TOKEN_FILE")
+	setString(&c.Bootstrap.Token, "HNIEOJ_BOOTSTRAP_TOKEN")
+	setInt(&c.WSS.ControlFrameBytes, "HNIEOJ_WSS_CONTROL_FRAME_BYTES")
+	setInt(&c.WSS.TaskFrameBytes, "HNIEOJ_WSS_TASK_FRAME_BYTES")
+	setDuration(&c.WSS.AuthDeadline, "HNIEOJ_WSS_AUTH_DEADLINE")
+	setDuration(&c.WSS.RequestTimeout, "HNIEOJ_WSS_REQUEST_TIMEOUT")
+	setDuration(&c.WSS.ConnectMinBackoff, "HNIEOJ_WSS_CONNECT_MIN_BACKOFF")
+	setDuration(&c.WSS.ConnectMaxBackoff, "HNIEOJ_WSS_CONNECT_MAX_BACKOFF")
+	setDuration(&c.WSS.HeartbeatInterval, "HNIEOJ_WSS_HEARTBEAT_INTERVAL")
+	setDuration(&c.WSS.WriteTimeout, "HNIEOJ_WSS_WRITE_TIMEOUT")
+	setString(&c.WSS.ResultQueueDir, "HNIEOJ_RESULT_QUEUE_DIR")
+	setInt(&c.WSS.ResultMaxRecords, "HNIEOJ_RESULT_MAX_RECORDS")
+	setInt64(&c.WSS.ResultMaxBytes, "HNIEOJ_RESULT_MAX_BYTES")
+	setInt64(&c.WSS.ResultMaxRecordBytes, "HNIEOJ_RESULT_MAX_RECORD_BYTES")
+	setDuration(&c.WSS.ResultTTL, "HNIEOJ_RESULT_TTL")
+	setDuration(&c.WSS.ResultRetryBackoff, "HNIEOJ_RESULT_RETRY_BACKOFF")
+	setBool(&c.Rotation.Enabled, "HNIEOJ_ROTATION_ENABLED")
+	setDuration(&c.Rotation.Interval, "HNIEOJ_ROTATION_INTERVAL")
+	setDuration(&c.Rotation.Grace, "HNIEOJ_ROTATION_GRACE")
+	setDuration(&c.Rotation.ConfirmTimeout, "HNIEOJ_ROTATION_CONFIRM_TIMEOUT")
 	setString(&c.Testdata.CacheRoot, "HNIEOJ_TESTDATA_CACHE_ROOT")
 	setInt64(&c.Testdata.MaxCacheBytes, "HNIEOJ_TESTDATA_MAX_CACHE_BYTES")
 	setDuration(&c.Testdata.MaxUnusedDuration, "HNIEOJ_TESTDATA_MAX_UNUSED_DURATION")
@@ -306,13 +412,9 @@ func applyEnv(c *Config) {
 	setDuration(&c.Testdata.StatsInterval, "HNIEOJ_TESTDATA_STATS_INTERVAL")
 	setString(&c.GoJudge.Endpoint, "HNIEOJ_GOJUDGE_ENDPOINT")
 	setString(&c.GoJudge.AuthToken, "HNIEOJ_GOJUDGE_AUTH_TOKEN")
-	setString(&c.Reporter.Mode, "HNIEOJ_REPORTER_MODE")
-	setString(&c.Reporter.Endpoint, "HNIEOJ_REPORTER_ENDPOINT")
-	setBool(&c.Remote.Enabled, "HNIEOJ_REMOTE_CONFIG_ENABLED")
-	setString(&c.Remote.Nacos.ServerAddr, "HNIEOJ_REMOTE_CONFIG_NACOS_SERVER_ADDR")
-	setString(&c.Remote.Nacos.Namespace, "HNIEOJ_REMOTE_CONFIG_NACOS_NAMESPACE")
-	setString(&c.Remote.Nacos.Group, "HNIEOJ_REMOTE_CONFIG_NACOS_GROUP")
-	setString(&c.Remote.Nacos.DataID, "HNIEOJ_REMOTE_CONFIG_NACOS_DATA_ID")
+	setDuration(&c.Worker.EmptyMinBackoff, "HNIEOJ_WORKER_EMPTY_MIN_BACKOFF")
+	setDuration(&c.Worker.EmptyMaxBackoff, "HNIEOJ_WORKER_EMPTY_MAX_BACKOFF")
+	setDuration(&c.Worker.DrainTimeout, "HNIEOJ_WORKER_DRAIN_TIMEOUT")
 }
 
 func setString(dst *string, key string) {
@@ -400,113 +502,4 @@ func normalizeJudgeModes(modes []string) ([]string, error) {
 		return []string{"default"}, nil
 	}
 	return out, nil
-}
-
-type remoteConfigOverlay struct {
-	Node struct {
-		MaxConcurrency      *int     `yaml:"maxConcurrency"`
-		SupportedJudgeModes []string `yaml:"supportedJudgeModes"`
-	} `yaml:"node"`
-	RabbitMQ struct {
-		Prefetch     *int           `yaml:"prefetch"`
-		MaxRetries   *int           `yaml:"maxRetries"`
-		RetryBackoff *time.Duration `yaml:"retryBackoff"`
-	} `yaml:"rabbitmq"`
-	Testdata struct {
-		MaxCacheBytes     *int64         `yaml:"maxCacheBytes"`
-		MaxUnusedDuration *time.Duration `yaml:"maxUnusedDuration"`
-		CleanupInterval   *time.Duration `yaml:"cleanupInterval"`
-		StatsInterval     *time.Duration `yaml:"statsInterval"`
-	} `yaml:"testdata"`
-	Heartbeat struct {
-		Enabled  *bool          `yaml:"enabled"`
-		Endpoint *string        `yaml:"endpoint"`
-		Interval *time.Duration `yaml:"interval"`
-	} `yaml:"heartbeat"`
-}
-
-func applyRemoteConfig(ctx context.Context, cfg *Config) error {
-	if !cfg.Remote.Enabled {
-		return nil
-	}
-	if cfg.Remote.Nacos.ServerAddr == "" || cfg.Remote.Nacos.Group == "" || cfg.Remote.Nacos.DataID == "" {
-		return errors.New("remote config nacos settings are required")
-	}
-	body, err := fetchNacosConfig(ctx, cfg.Remote.Nacos)
-	if err != nil {
-		return err
-	}
-	var overlay remoteConfigOverlay
-	if err := yaml.Unmarshal(body, &overlay); err != nil {
-		return err
-	}
-	mergeRemoteConfig(cfg, overlay)
-	return nil
-}
-
-func fetchNacosConfig(ctx context.Context, nacos NacosConfig) ([]byte, error) {
-	baseURL := strings.TrimRight(nacos.ServerAddr, "/")
-	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-		baseURL = "http://" + baseURL
-	}
-	values := url.Values{}
-	values.Set("dataId", nacos.DataID)
-	values.Set("group", nacos.Group)
-	if nacos.Namespace != "" {
-		values.Set("tenant", nacos.Namespace)
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/nacos/v1/cs/configs?"+values.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("fetch remote config from nacos failed with status %d", resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
-}
-
-func mergeRemoteConfig(cfg *Config, overlay remoteConfigOverlay) {
-	if overlay.Node.MaxConcurrency != nil {
-		cfg.Node.MaxConcurrency = *overlay.Node.MaxConcurrency
-	}
-	if overlay.Node.SupportedJudgeModes != nil {
-		cfg.Node.SupportedJudgeModes = overlay.Node.SupportedJudgeModes
-	}
-	if overlay.RabbitMQ.Prefetch != nil {
-		cfg.RabbitMQ.Prefetch = *overlay.RabbitMQ.Prefetch
-	}
-	if overlay.RabbitMQ.MaxRetries != nil {
-		cfg.RabbitMQ.MaxRetries = *overlay.RabbitMQ.MaxRetries
-	}
-	if overlay.RabbitMQ.RetryBackoff != nil {
-		cfg.RabbitMQ.RetryBackoff = *overlay.RabbitMQ.RetryBackoff
-	}
-	if overlay.Testdata.MaxCacheBytes != nil {
-		cfg.Testdata.MaxCacheBytes = *overlay.Testdata.MaxCacheBytes
-	}
-	if overlay.Testdata.MaxUnusedDuration != nil {
-		cfg.Testdata.MaxUnusedDuration = *overlay.Testdata.MaxUnusedDuration
-	}
-	if overlay.Testdata.CleanupInterval != nil {
-		cfg.Testdata.CleanupInterval = *overlay.Testdata.CleanupInterval
-	}
-	if overlay.Testdata.StatsInterval != nil {
-		cfg.Testdata.StatsInterval = *overlay.Testdata.StatsInterval
-	}
-	if overlay.Heartbeat.Enabled != nil {
-		cfg.Heartbeat.Enabled = *overlay.Heartbeat.Enabled
-	}
-	if overlay.Heartbeat.Endpoint != nil {
-		cfg.Heartbeat.Endpoint = *overlay.Heartbeat.Endpoint
-	}
-	if overlay.Heartbeat.Interval != nil {
-		cfg.Heartbeat.Interval = *overlay.Heartbeat.Interval
-	}
 }

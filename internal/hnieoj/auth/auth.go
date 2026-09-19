@@ -1,741 +1,192 @@
+// Package auth 管理 WSS 短期授权凭证（NODE_ACCESS）与错误分类。
+// 身份是本地 Ed25519 私钥；AccessToken 只是短期授权，不是身份，过期后可用有效密钥重新认证。
+// 该包不持有任何私钥，私钥只在 identity.Store 中。
 package auth
 
 import (
-	"bytes"
-	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"net/url"
-	"os"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/criyle/go-judge/internal/hnieoj/config"
-	"github.com/goccy/go-yaml"
 )
 
-const tempTokenProofTypeEd25519 = "ed25519"
-
+// Credential 是线程安全的短期运行授权快照。
 type Credential struct {
-	mu              sync.RWMutex
-	HeaderName      string
-	HeaderValue     string
-	NodeID          string
-	TokenID         string
-	ExpireTime      time.Time
-	InstanceID      string
-	FingerprintHash string
-	ProofType       string
-	InstanceSecret  []byte
+	mu sync.RWMutex
+
+	NodeID       string
+	KeyID        string
+	NodeType     string
+	Audience     string
+	AccessToken  string
+	AccessExpiry int64 // Unix 毫秒
+	// SessionEpoch 由服务端在每次成功初始认证时原子递增；换连接可能变化。
+	SessionEpoch int64
+	// AuthorizationUntil 是身份的业务硬截止（Unix 毫秒），0 表示未知/不限。
+	AuthorizationUntil int64
+	// KeyGraceUntil 是当前签名 key 的 grace 截止（Unix 毫秒），0 表示无。
+	KeyGraceUntil           int64
+	MaxConcurrency          int
+	SupportedJudgeModes     []string
+	HeartbeatIntervalMillis int
+	revoked                 bool
 }
 
-func (c *Credential) Apply(req *http.Request) {
-	c.mu.RLock()
-	headerName := c.HeaderName
-	headerValue := c.HeaderValue
-	nodeID := c.NodeID
-	tokenID := c.TokenID
-	instanceID := c.InstanceID
-	fingerprintHash := c.FingerprintHash
-	proofType := c.ProofType
-	instanceSecret := append([]byte(nil), c.InstanceSecret...)
-	c.mu.RUnlock()
-	if headerName != "" && headerValue != "" {
-		req.Header.Set(headerName, headerValue)
-	}
-	if nodeID != "" {
-		req.Header.Set("X-Judge-Node-Id", nodeID)
-	}
-	if tokenID != "" {
-		req.Header.Set("X-Judge-Token-Id", tokenID)
-	}
-	if instanceID != "" {
-		req.Header.Set("X-Judge-Instance-Id", instanceID)
-	}
-	if fingerprintHash != "" {
-		req.Header.Set("X-Judge-Fingerprint", fingerprintHash)
-	}
-	if len(instanceSecret) > 0 {
-		signRequest(req, instanceSecret, proofType)
-	}
-}
-
-func (c *Credential) Expired(now time.Time) bool {
-	expireTime := c.ExpiresAt()
-	return !expireTime.IsZero() && !now.Before(expireTime)
-}
-
-func (c *Credential) SetHeaderValue(value string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.HeaderValue = value
-}
-
-func (c *Credential) ExpiresAt() time.Time {
+// Snapshot 返回只读副本。
+func (c *Credential) Snapshot() Credential {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.ExpireTime
+	return Credential{
+		NodeID:                  c.NodeID,
+		KeyID:                   c.KeyID,
+		NodeType:                c.NodeType,
+		Audience:                c.Audience,
+		AccessToken:             c.AccessToken,
+		AccessExpiry:            c.AccessExpiry,
+		SessionEpoch:            c.SessionEpoch,
+		AuthorizationUntil:      c.AuthorizationUntil,
+		KeyGraceUntil:           c.KeyGraceUntil,
+		MaxConcurrency:          c.MaxConcurrency,
+		SupportedJudgeModes:     append([]string(nil), c.SupportedJudgeModes...),
+		HeartbeatIntervalMillis: c.HeartbeatIntervalMillis,
+		revoked:                 c.revoked,
+	}
 }
 
+// Replace 用新快照覆盖当前凭证。
 func (c *Credential) Replace(next *Credential) {
 	if next == nil {
 		return
 	}
-	next.mu.RLock()
-	headerName := next.HeaderName
-	headerValue := next.HeaderValue
-	nodeID := next.NodeID
-	tokenID := next.TokenID
-	expireTime := next.ExpireTime
-	instanceID := next.InstanceID
-	fingerprintHash := next.FingerprintHash
-	proofType := next.ProofType
-	instanceSecret := append([]byte(nil), next.InstanceSecret...)
-	next.mu.RUnlock()
-
+	snapshot := next.Snapshot()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.HeaderName = headerName
-	c.HeaderValue = headerValue
-	c.NodeID = nodeID
-	c.TokenID = tokenID
-	c.ExpireTime = expireTime
-	c.InstanceID = instanceID
-	c.FingerprintHash = fingerprintHash
-	c.ProofType = proofType
-	c.InstanceSecret = instanceSecret
+	c.NodeID = snapshot.NodeID
+	c.KeyID = snapshot.KeyID
+	c.NodeType = snapshot.NodeType
+	c.Audience = snapshot.Audience
+	c.AccessToken = snapshot.AccessToken
+	c.AccessExpiry = snapshot.AccessExpiry
+	c.SessionEpoch = snapshot.SessionEpoch
+	c.AuthorizationUntil = snapshot.AuthorizationUntil
+	c.KeyGraceUntil = snapshot.KeyGraceUntil
+	c.MaxConcurrency = snapshot.MaxConcurrency
+	c.SupportedJudgeModes = snapshot.SupportedJudgeModes
+	c.HeartbeatIntervalMillis = snapshot.HeartbeatIntervalMillis
+	c.revoked = false
 }
 
-func Authenticate(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
-	switch cfg.Node.Type {
-	case "formal":
-		token, err := resolveFormalToken(ctx, cfg.HnieOJ.FormalToken, client)
-		if err != nil {
-			return nil, err
-		}
-		cred := &Credential{HeaderName: "X-Judge-Token", HeaderValue: token, NodeID: cfg.Node.Name}
-		startFormalTokenRefresher(ctx, cfg.HnieOJ.FormalToken, client, cred)
-		return cred, nil
-	case "temp":
-		cred, err := resolveTempCredential(ctx, cfg, client)
-		if err != nil {
-			return nil, err
-		}
-		startTempTokenRefresher(ctx, cfg, client, cred)
-		return cred, nil
-	default:
-		return nil, fmt.Errorf("unsupported node type %q", cfg.Node.Type)
-	}
+// Expired 判断 AccessToken 是否已过期（Unix 毫秒）。
+func (c *Credential) Expired(now time.Time) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.expiredLocked(now)
 }
 
-func resolveFormalToken(ctx context.Context, cfg config.FormalToken, client *http.Client) (string, error) {
-	if cfg.Nacos.ServerAddr != "" && cfg.Nacos.DataID != "" && cfg.Nacos.Group != "" {
-		encryptedToken, err := fetchEncryptedTokenFromNacos(ctx, cfg, client)
-		if err == nil {
-			return decryptFormalToken(cfg, encryptedToken)
-		}
-		if isPlaceholderToken(cfg.EncryptedToken) {
-			return "", err
-		}
-	}
-
-	encryptedToken := strings.TrimSpace(cfg.EncryptedToken)
-	if isPlaceholderToken(encryptedToken) {
-		return "", errors.New("formal encrypted token is required")
-	}
-	return decryptFormalToken(cfg, encryptedToken)
+func (c *Credential) expiredLocked(now time.Time) bool {
+	return c.AccessExpiry > 0 && now.UnixMilli() >= c.AccessExpiry
 }
 
-func isPlaceholderToken(value string) bool {
-	normalized := strings.TrimSpace(value)
-	return normalized == "" || normalized == "replace_me" || normalized == "{rsa}Base64CipherText"
+// ExpiresAt 返回 AccessToken 到期时间。
+func (c *Credential) ExpiresAt() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.AccessExpiry <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(c.AccessExpiry)
 }
 
-func startFormalTokenRefresher(ctx context.Context, cfg config.FormalToken, client *http.Client, cred *Credential) {
-	if cfg.Nacos.ServerAddr == "" || cfg.Nacos.DataID == "" || cfg.Nacos.Group == "" {
-		return
-	}
-	interval := cfg.RefreshInterval
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				token, err := resolveFormalToken(ctx, cfg, client)
-				if err != nil {
-					continue
-				}
-				cred.SetHeaderValue(token)
-			}
-		}
-	}()
+func (c *Credential) AccessTokenValue() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.AccessToken
 }
 
-func startTempTokenRefresher(ctx context.Context, cfg config.Config, client *http.Client, cred *Credential) {
-	if cfg.HnieOJ.TempToken.AuthCode == "" {
-		return
-	}
-	go func() {
-		for {
-			wait := tempRefreshDelay(cred.ExpiresAt(), time.Now())
-			if wait > 0 {
-				timer := time.NewTimer(wait)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
-			}
-			next, err := exchangeTempToken(ctx, cfg, client)
-			if err != nil {
-				timer := time.NewTimer(30 * time.Second)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
-				continue
-			}
-			cred.Replace(next)
-		}
-	}()
+func (c *Credential) KeyIDValue() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.KeyID
 }
 
-func resolveTempCredential(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
-	if strings.TrimSpace(cfg.HnieOJ.TempToken.JWT) != "" {
-		return credentialFromTempTokenConfig(cfg.HnieOJ.TempToken)
-	}
-	return exchangeTempToken(ctx, cfg, client)
+func (c *Credential) NodeIDValue() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.NodeID
 }
 
-func ExchangeTempToken(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
-	return exchangeTempToken(ctx, cfg, client)
+func (c *Credential) SessionEpochValue() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.SessionEpoch
 }
 
-func credentialFromTempTokenConfig(cfg config.TempToken) (*Credential, error) {
-	token := strings.TrimSpace(cfg.JWT)
-	if token == "" {
-		return nil, errors.New("temp jwt is required")
-	}
-	tokenType := strings.TrimSpace(cfg.TokenType)
-	if tokenType == "" {
-		tokenType = "Bearer"
-	}
-	expireTime, err := parseExpireTime(cfg.ExpireTime)
-	if err != nil {
-		return nil, err
-	}
-	binding, err := buildTempNodeBinding(config.Config{HnieOJ: config.HnieOJConfig{TempToken: cfg}})
-	if err != nil {
-		return nil, err
-	}
-	fingerprintHash := strings.TrimSpace(cfg.FingerprintHash)
-	if fingerprintHash == "" && binding != nil {
-		fingerprintHash = binding.FingerprintHash
-	}
-	return &Credential{
-		HeaderName:      "Authorization",
-		HeaderValue:     tokenType + " " + token,
-		NodeID:          strings.TrimSpace(cfg.NodeID),
-		TokenID:         strings.TrimSpace(cfg.TokenID),
-		ExpireTime:      expireTime,
-		InstanceID:      bindingInstanceID(binding),
-		FingerprintHash: fingerprintHash,
-		ProofType:       bindingProofType(binding, cfg.ProofType),
-		InstanceSecret:  bindingSecret(binding),
-	}, nil
+func (c *Credential) Revoked() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.revoked
 }
 
-func tempRefreshDelay(expireTime, now time.Time) time.Duration {
-	if expireTime.IsZero() {
-		return time.Hour
+func (c *Credential) MarkRevoked() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.revoked = true
+}
+
+// DeniedError 表示服务端明确拒绝（401/403 或 Result.code 401/403、revoked/expired/epoch stale）。
+// 这类错误不应在同一会话/身份上重试，必须停止并等待人工处理，绝不允许自动另注册绕过。
+type DeniedError struct {
+	StatusCode int
+	Code       int
+	Msg        string
+}
+
+func (e *DeniedError) Error() string {
+	if e.Msg != "" {
+		return fmt.Sprintf("server denied request: http %d code %d: %s", e.StatusCode, e.Code, e.Msg)
 	}
-	refreshAt := expireTime.Add(-time.Minute)
-	if !refreshAt.After(now) {
+	return fmt.Sprintf("server denied request: http %d code %d", e.StatusCode, e.Code)
+}
+
+// IsDenied 判断错误是否属于不可重试的服务端拒绝。
+func IsDenied(err error) bool {
+	var denied *DeniedError
+	return errors.As(err, &denied) || errors.Is(err, ErrIdentityRejected)
+}
+
+// ErrIdentityRejected 表示身份已失效/被撤销，禁止自动重新注册绕过。
+var ErrIdentityRejected = errors.New("node identity rejected by server")
+
+// PermanentError 表示服务端返回 retryable=false，不应重建连接重试。
+type PermanentError struct {
+	Code int
+	Msg  string
+}
+
+func (e *PermanentError) Error() string {
+	return fmt.Sprintf("permanent server error code=%d msg=%s", e.Code, e.Msg)
+}
+
+func IsPermanent(err error) bool {
+	var permanent *PermanentError
+	return errors.As(err, &permanent)
+}
+
+// JWTExpiryMillis 只解码 JWT payload 的 exp 供本地调度使用。
+// 服务端验签仍是唯一权威；这里不校验签名，也绝不用它做授权判断。
+func JWTExpiryMillis(token string) int64 {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
 		return 0
 	}
-	return refreshAt.Sub(now)
-}
-
-func decryptFormalToken(cfg config.FormalToken, encryptedToken string) (string, error) {
-	if encryptedToken == "" {
-		return "", errors.New("formal encrypted token is required")
-	}
-	if cfg.PrivateKeyPath == "" {
-		return "", errors.New("formal private key path is required")
-	}
-	if cfg.CipherAlgorithm != "" && cfg.CipherAlgorithm != "RSA/ECB/OAEPWithSHA-256AndMGF1Padding" {
-		return "", fmt.Errorf("unsupported cipher algorithm %q", cfg.CipherAlgorithm)
-	}
-	privateKey, err := readPrivateKey(cfg.PrivateKeyPath)
+	raw, err := base64URLDecode(parts[1])
 	if err != nil {
-		return "", err
+		return 0
 	}
-	cipherText := strings.TrimPrefix(encryptedToken, "{rsa}")
-	raw, err := base64.StdEncoding.DecodeString(cipherText)
-	if err != nil {
-		return "", err
+	var claims map[string]any
+	if err := jsonUnmarshal(raw, &claims); err != nil {
+		return 0
 	}
-	plain, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, raw, nil)
-	if err != nil {
-		return "", err
-	}
-	return string(plain), nil
-}
-
-func readPrivateKey(path string) (*rsa.PrivateKey, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	block, _ := pem.Decode(b)
-	if block == nil {
-		return nil, errors.New("invalid PEM private key")
-	}
-	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		if rsaKey, ok := key.(*rsa.PrivateKey); ok {
-			return rsaKey, nil
-		}
-		return nil, errors.New("private key is not RSA")
-	}
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-	return key, nil
-}
-
-type formalTokenConfigResponse struct {
-	HnieOJ struct {
-		Judge struct {
-			FormalToken struct {
-				EncryptedToken string `yaml:"encrypted-token"`
-			} `yaml:"formal-token"`
-		} `yaml:"judge"`
-	} `yaml:"hnieoj"`
-}
-
-func fetchEncryptedTokenFromNacos(ctx context.Context, cfg config.FormalToken, client *http.Client) (string, error) {
-	if cfg.Nacos.ServerAddr == "" || cfg.Nacos.DataID == "" || cfg.Nacos.Group == "" {
-		return "", errors.New("formal token nacos config is required")
-	}
-	baseURL := strings.TrimRight(cfg.Nacos.ServerAddr, "/")
-	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-		baseURL = "http://" + baseURL
-	}
-	values := url.Values{}
-	values.Set("dataId", cfg.Nacos.DataID)
-	values.Set("group", cfg.Nacos.Group)
-	if cfg.Nacos.Namespace != "" {
-		values.Set("tenant", cfg.Nacos.Namespace)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/nacos/v1/cs/configs?"+values.Encode(), nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("fetch formal token from nacos failed with status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	var out formalTokenConfigResponse
-	if err := yaml.Unmarshal(body, &out); err != nil {
-		return "", err
-	}
-	encryptedToken := strings.TrimSpace(out.HnieOJ.Judge.FormalToken.EncryptedToken)
-	if encryptedToken == "" {
-		return "", errors.New("formal encrypted token is empty in nacos")
-	}
-	return encryptedToken, nil
-}
-
-func buildTempNodeBinding(cfg config.Config) (*tempNodeBinding, error) {
-	temp := cfg.HnieOJ.TempToken
-	instanceID := strings.TrimSpace(temp.InstanceID)
-	secretPath := strings.TrimSpace(temp.InstanceSecretPath)
-	if instanceID == "" && secretPath == "" {
-		return nil, nil
-	}
-	proofType := strings.TrimSpace(temp.ProofType)
-	if proofType == "" {
-		proofType = tempTokenProofTypeEd25519
-	}
-	if proofType != tempTokenProofTypeEd25519 {
-		return nil, fmt.Errorf("unsupported temp token proof type %q", proofType)
-	}
-	var secret []byte
-	if secretPath != "" {
-		b, err := os.ReadFile(secretPath)
-		if err != nil {
-			return nil, err
-		}
-		secret = []byte(strings.TrimSpace(string(b)))
-		if len(secret) == 0 {
-			return nil, fmt.Errorf("temp instance secret file %q is empty", secretPath)
-		}
-	}
-	fingerprint := buildTempNodeFingerprint(instanceID, cfg.Node.Name, cfg.Node.SupportedJudgeModes, time.Now())
-	proof := tempNodeProof{Type: proofType}
-	if len(secret) > 0 {
-		proof.PublicKey = ed25519PublicKey(secret)
-	}
-	return &tempNodeBinding{
-		Fingerprint:     fingerprint,
-		Proof:           proof,
-		FingerprintHash: hashFingerprint(fingerprint),
-		InstanceSecret:  secret,
-	}, nil
-}
-
-func buildTempNodeFingerprint(instanceID, nodeName string, supportedModes []string, now time.Time) tempNodeFingerprint {
-	hostname, _ := os.Hostname()
-	macHashes, ipHashes := networkIdentityHashes()
-	machineHash := machineIDHash()
-	if machineHash == "" {
-		machineHash = hashString("hnieoj-temp-instance:" + strings.TrimSpace(instanceID))
-	}
-	if machineHash == "" {
-		machineHash = hashString("hnieoj-hostname:" + hostname)
-	}
-	return tempNodeFingerprint{
-		InstanceID:          strings.TrimSpace(instanceID),
-		NodeName:            strings.TrimSpace(nodeName),
-		HostnameHash:        hashString(hostname),
-		MachineIDHash:       machineHash,
-		MACAddressHashes:    macHashes,
-		IPAddressHashes:     ipHashes,
-		SupportedJudgeModes: append([]string(nil), supportedModes...),
-		ClientTime:          now.UTC().Format(time.RFC3339),
-	}
-}
-
-func hashFingerprint(fingerprint tempNodeFingerprint) string {
-	stable := fingerprint
-	stable.ClientTime = ""
-	body, err := json.Marshal(stable)
-	if err != nil {
-		return ""
-	}
-	return hashBytes(body)
-}
-
-func machineIDHash() string {
-	for _, path := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
-		b, err := os.ReadFile(path)
-		if err == nil {
-			if value := strings.TrimSpace(string(b)); value != "" {
-				return hashString(value)
-			}
-		}
-	}
-	return ""
-}
-
-func networkIdentityHashes() ([]string, []string) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil, nil
-	}
-	macSet := make(map[string]struct{})
-	ipSet := make(map[string]struct{})
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-		if len(iface.HardwareAddr) > 0 {
-			macSet[hashString(iface.HardwareAddr.String())] = struct{}{}
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip == nil || ip.IsLoopback() {
-				continue
-			}
-			ipSet[hashString(ip.String())] = struct{}{}
-		}
-	}
-	return sortedKeys(macSet), sortedKeys(ipSet)
-}
-
-func sortedKeys(set map[string]struct{}) []string {
-	if len(set) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(set))
-	for value := range set {
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func hashString(value string) string {
-	if value == "" {
-		return ""
-	}
-	return hashBytes([]byte(value))
-}
-
-func hashBytes(value []byte) string {
-	sum := sha256.Sum256(value)
-	return hex.EncodeToString(sum[:])
-}
-
-func ed25519PrivateKey(secret []byte) ed25519.PrivateKey {
-	seed := sha256.Sum256(secret)
-	return ed25519.NewKeyFromSeed(seed[:])
-}
-
-func ed25519PublicKey(secret []byte) string {
-	privateKey := ed25519PrivateKey(secret)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
-	return base64.StdEncoding.EncodeToString(publicKey)
-}
-
-func bindingInstanceID(binding *tempNodeBinding) string {
-	if binding == nil {
-		return ""
-	}
-	return binding.Fingerprint.InstanceID
-}
-
-func bindingProofType(binding *tempNodeBinding, fallback string) string {
-	if binding != nil && binding.Proof.Type != "" {
-		return binding.Proof.Type
-	}
-	if fallback != "" {
-		return fallback
-	}
-	return tempTokenProofTypeEd25519
-}
-
-func bindingSecret(binding *tempNodeBinding) []byte {
-	if binding == nil || len(binding.InstanceSecret) == 0 {
-		return nil
-	}
-	return append([]byte(nil), binding.InstanceSecret...)
-}
-
-func signRequest(req *http.Request, secret []byte, proofType string) {
-	if proofType == "" {
-		proofType = tempTokenProofTypeEd25519
-	}
-	if proofType != tempTokenProofTypeEd25519 {
-		return
-	}
-	timestamp := strconv.FormatInt(time.Now().UTC().Unix(), 10)
-	nonce := randomNonce()
-	bodyHash := requestBodyHash(req)
-	target := req.URL.RequestURI()
-	if target == "" {
-		target = "/"
-	}
-	payload := strings.Join([]string{
-		req.Method,
-		target,
-		bodyHash,
-		timestamp,
-		nonce,
-	}, "\n")
-	req.Header.Set("X-Judge-Signature-Algorithm", proofType)
-	req.Header.Set("X-Judge-Timestamp", timestamp)
-	req.Header.Set("X-Judge-Nonce", nonce)
-	req.Header.Set("X-Judge-Body-Sha256", bodyHash)
-	signature := ed25519.Sign(ed25519PrivateKey(secret), []byte(payload))
-	req.Header.Set("X-Judge-Signature", base64.StdEncoding.EncodeToString(signature))
-}
-
-func randomNonce() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 36)
-	}
-	return base64.RawURLEncoding.EncodeToString(b[:])
-}
-
-func requestBodyHash(req *http.Request) string {
-	if req.Body == nil || req.Body == http.NoBody {
-		return hashBytes([]byte{})
-	}
-	if req.GetBody != nil {
-		body, err := req.GetBody()
-		if err == nil {
-			defer body.Close()
-			b, err := io.ReadAll(body)
-			if err == nil {
-				return hashBytes(b)
-			}
-		}
-	}
-	b, err := io.ReadAll(req.Body)
-	if err != nil {
-		req.Body = io.NopCloser(bytes.NewReader(nil))
-		return hashBytes([]byte{})
-	}
-	req.Body = io.NopCloser(bytes.NewReader(b))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(b)), nil
-	}
-	return hashBytes(b)
-}
-
-type tempNodeFingerprint struct {
-	InstanceID          string   `json:"instanceId,omitempty"`
-	NodeName            string   `json:"nodeName,omitempty"`
-	HostnameHash        string   `json:"hostnameHash,omitempty"`
-	MachineIDHash       string   `json:"machineIdHash,omitempty"`
-	MACAddressHashes    []string `json:"macAddressHashes,omitempty"`
-	IPAddressHashes     []string `json:"ipAddressHashes,omitempty"`
-	SupportedJudgeModes []string `json:"supportedJudgeModes,omitempty"`
-	ClientTime          string   `json:"clientTime,omitempty"`
-}
-
-type tempNodeProof struct {
-	Type       string `json:"type,omitempty"`
-	SecretHash string `json:"secretHash,omitempty"`
-	PublicKey  string `json:"publicKey,omitempty"`
-}
-
-type tempNodeBinding struct {
-	Fingerprint     tempNodeFingerprint
-	Proof           tempNodeProof
-	FingerprintHash string
-	InstanceSecret  []byte
-}
-
-type tempTokenRequest struct {
-	AuthCode    string               `json:"authCode"`
-	NodeName    string               `json:"nodeName"`
-	Fingerprint *tempNodeFingerprint `json:"fingerprint,omitempty"`
-	Proof       *tempNodeProof       `json:"proof,omitempty"`
-}
-
-type tempTokenResponse struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data struct {
-		Token           string `json:"token"`
-		TokenType       string `json:"tokenType"`
-		NodeID          string `json:"nodeId"`
-		TokenID         string `json:"tokenId"`
-		ExpireTime      string `json:"expireTime"`
-		FingerprintHash string `json:"fingerprintHash"`
-	} `json:"data"`
-}
-
-func exchangeTempToken(ctx context.Context, cfg config.Config, client *http.Client) (*Credential, error) {
-	if cfg.HnieOJ.TempToken.AuthCode == "" {
-		return nil, errors.New("temp auth code is required")
-	}
-	tokenRequest := tempTokenRequest{
-		AuthCode: cfg.HnieOJ.TempToken.AuthCode,
-		NodeName: cfg.Node.Name,
-	}
-	binding, err := buildTempNodeBinding(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if binding != nil {
-		tokenRequest.Fingerprint = &binding.Fingerprint
-		tokenRequest.Proof = &binding.Proof
-	}
-	body, err := json.Marshal(tokenRequest)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.HnieOJ.BaseURL, "/")+"/api/judge/temp-token", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("temp token exchange failed with status %d", resp.StatusCode)
-	}
-	var out tempTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	if out.Code != 200 || out.Data.Token == "" {
-		return nil, fmt.Errorf("temp token exchange failed: %s", out.Msg)
-	}
-	tokenType := out.Data.TokenType
-	if tokenType == "" {
-		tokenType = "Bearer"
-	}
-	expireTime, err := parseExpireTime(out.Data.ExpireTime)
-	if err != nil {
-		return nil, err
-	}
-	fingerprintHash := strings.TrimSpace(out.Data.FingerprintHash)
-	if fingerprintHash == "" {
-		fingerprintHash = strings.TrimSpace(cfg.HnieOJ.TempToken.FingerprintHash)
-	}
-	if fingerprintHash == "" && binding != nil {
-		fingerprintHash = binding.FingerprintHash
-	}
-	return &Credential{
-		HeaderName:      "Authorization",
-		HeaderValue:     tokenType + " " + out.Data.Token,
-		NodeID:          out.Data.NodeID,
-		TokenID:         out.Data.TokenID,
-		ExpireTime:      expireTime,
-		InstanceID:      bindingInstanceID(binding),
-		FingerprintHash: fingerprintHash,
-		ProofType:       bindingProofType(binding, cfg.HnieOJ.TempToken.ProofType),
-		InstanceSecret:  bindingSecret(binding),
-	}, nil
-}
-
-func parseExpireTime(s string) (time.Time, error) {
-	if s == "" {
-		return time.Time{}, nil
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
-	}
-	return time.ParseInLocation("2006-01-02T15:04:05", s, time.Local)
+	return normalizeEpoch(claims["exp"])
 }
