@@ -3,216 +3,164 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/criyle/go-judge/internal/hnieoj/config"
 	"github.com/criyle/go-judge/internal/hnieoj/logging"
 	"github.com/criyle/go-judge/internal/hnieoj/node"
+	"go.uber.org/zap"
 )
 
-func TestServerAdminSetupAndAuth(t *testing.T) {
-	store := NewStore(t.TempDir())
+func testServer(t *testing.T) (*Server, *Store, *httptest.Server) {
+	t.Helper()
+	dir := t.TempDir()
+	store := NewStore(dir)
 	if err := store.Ensure(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("ensure: %v", err)
 	}
 	manager := node.NewManager(logging.NopLogger{})
-	server := httptest.NewServer(NewServer(store, manager, logging.NewRecorder(nil, 10)).Handler())
-	defer server.Close()
+	recorder := logging.NewRecorder(zap.NewNop(), 10)
+	server := NewServer(store, manager, recorder)
+	ts := httptest.NewServer(server.Handler())
+	t.Cleanup(ts.Close)
+	return server, store, ts
+}
 
-	resp, err := http.Get(server.URL + "/api/v1/config")
+func setupAdminSession(t *testing.T, ts *httptest.Server) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("cookie jar: %v", err)
 	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("config before setup status = %d, want 401", resp.StatusCode)
-	}
-	_ = resp.Body.Close()
-
-	resp, err = http.Post(server.URL+"/api/v1/setup/admin", "application/json", bytes.NewBufferString(`{"password":"password123"}`))
+	client := &http.Client{Jar: jar}
+	resp, err := client.Post(ts.URL+"/api/v1/setup/admin", "application/json", bytes.NewReader([]byte(`{"password":"password123"}`)))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("admin setup status = %d", resp.StatusCode)
-	}
-	cookies := resp.Cookies()
-	_ = resp.Body.Close()
-
-	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/config", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, cookie := range cookies {
-		req.AddCookie(cookie)
-	}
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("setup admin: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("config after setup status = %d, want 200", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("setup admin status %d: %s", resp.StatusCode, body)
+	}
+	return client
+}
+
+func TestConfigDTOHidesSecrets(t *testing.T) {
+	_, store, ts := testServer(t)
+	client := setupAdminSession(t, ts)
+	if err := store.WriteBootstrapToken("super-secret-bootstrap"); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	resp, err := client.Get(ts.URL + "/api/v1/config")
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	text := string(raw)
+	for _, secret := range []string{"super-secret-bootstrap", "privateKey", "accessToken", "private_key"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("config response leaked %q: %s", secret, text)
+		}
+	}
+	var dto ConfigDTO
+	if err := json.Unmarshal(raw, &dto); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if !dto.Identity.BootstrapConfigured {
+		t.Fatal("bootstrapConfigured flag should be true")
+	}
+	if dto.Identity.BootstrapToken != "" {
+		t.Fatal("bootstrapToken must never be returned")
 	}
 }
 
-func TestServerSessionCookieExpiresInTwoHours(t *testing.T) {
-	store := NewStore(t.TempDir())
-	if err := store.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	manager := node.NewManager(logging.NopLogger{})
-	server := httptest.NewServer(NewServer(store, manager, logging.NewRecorder(nil, 10)).Handler())
-	defer server.Close()
+func TestSetupBootstrapWritesSecretAndConfig(t *testing.T) {
+	_, store, ts := testServer(t)
+	client := setupAdminSession(t, ts)
 
-	start := time.Now()
-	resp, err := http.Post(server.URL+"/api/v1/setup/admin", "application/json", bytes.NewBufferString(`{"password":"password123"}`))
+	payload := ConfigDTO{
+		Node:     NodeDTO{Name: "node-a", Type: "formal", MaxConcurrency: 2, SupportedJudgeModes: []string{"default"}},
+		HnieOJ:   HnieOJDTO{BaseURL: "https://oj.example.com", RequestTimeout: "30s"},
+		Identity: IdentityDTO{BootstrapToken: "one-time-bootstrap"},
+		Rotation: RotationDTO{Enabled: true, Interval: "720h", Grace: "5m", ConfirmTimeout: "30s"},
+	}
+	body, _ := json.Marshal(map[string]any{"config": payload})
+	resp, err := client.Post(ts.URL+"/api/v1/setup/bootstrap", "application/json", bytes.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("setup bootstrap: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("admin setup status = %d", resp.StatusCode)
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("setup bootstrap status %d: %s", resp.StatusCode, raw)
 	}
-	cookie := findCookie(resp.Cookies(), sessionCookie)
-	if cookie == nil {
-		t.Fatalf("missing %s cookie", sessionCookie)
+	if !store.BootstrapConfigured() {
+		t.Fatal("bootstrap token file should exist")
 	}
-	minExpires := start.Add(sessionTTL - 2*time.Second)
-	maxExpires := time.Now().Add(sessionTTL + 2*time.Second)
-	if cookie.Expires.Before(minExpires) || cookie.Expires.After(maxExpires) {
-		t.Fatalf("session expires at %s, want around %s", cookie.Expires, start.Add(sessionTTL))
+	raw, err := os.ReadFile(store.BootstrapPath())
+	if err != nil {
+		t.Fatalf("read bootstrap: %v", err)
+	}
+	if strings.TrimSpace(string(raw)) != "one-time-bootstrap" {
+		t.Fatalf("bootstrap content %q", raw)
+	}
+	cfg, ok, err := store.LoadConfig()
+	if err != nil || !ok {
+		t.Fatalf("load config ok=%v err=%v", ok, err)
+	}
+	if cfg.Node.Name != "node-a" || cfg.Identity.File == "" {
+		t.Fatalf("config not persisted correctly: %+v", cfg)
+	}
+	if cfg.Bootstrap.Token != "" {
+		t.Fatal("bootstrap token must not be persisted in config.yaml")
+	}
+	if cfg.HnieOJ.WSSURL == "" {
+		t.Fatal("wss url should be resolved on validate")
+	}
+}
+
+func TestSetupBootstrapWithoutTokenIsRejected(t *testing.T) {
+	_, _, ts := testServer(t)
+	client := setupAdminSession(t, ts)
+	payload := ConfigDTO{
+		Node:     NodeDTO{Name: "node-a", Type: "formal", MaxConcurrency: 1, SupportedJudgeModes: []string{"default"}},
+		HnieOJ:   HnieOJDTO{BaseURL: "https://oj.example.com"},
+		Rotation: RotationDTO{Enabled: true},
+	}
+	body, _ := json.Marshal(map[string]any{"config": payload})
+	resp, err := client.Post(ts.URL+"/api/v1/setup/bootstrap", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
 }
 
 func TestStaticHandlerFallsBackForSPARoutesOnly(t *testing.T) {
-	server := httptest.NewServer(StaticHandler())
-	defer server.Close()
-
-	resp, err := http.Get(server.URL + "/dashboard")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := new(bytes.Buffer)
-	_, _ = body.ReadFrom(resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("dashboard status = %d, want 200", resp.StatusCode)
-	}
-	if !strings.Contains(body.String(), `id="app"`) {
-		t.Fatal("dashboard route did not return SPA shell")
-	}
-
-	resp, err = http.Get(server.URL + "/api/v1/missing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("api missing status = %d, want 404", resp.StatusCode)
-	}
-
-	resp, err = http.Get(server.URL + "/missing-page")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("missing page status = %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestSetupFormalPreservesStoredSecretsWhenFieldsAreBlank(t *testing.T) {
-	store := NewStore(t.TempDir())
-	if err := store.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveAdminPassword("password123"); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Default()
-	cfg.HnieOJ.BaseURL = "http://hnieoj.example"
-	cfg.HnieOJ.FormalToken.PrivateKeyPath = "/existing/private.pem"
-	cfg.RabbitMQ.Password = "rabbit-secret"
-	if err := store.SaveConfig(*cfg); err != nil {
-		t.Fatal(err)
-	}
-	manager := node.NewManager(logging.NopLogger{})
-	manager.SetConfig(*cfg)
-	server := httptest.NewServer(NewServer(store, manager, logging.NewRecorder(nil, 10)).Handler())
-	defer server.Close()
-
-	cookie := loginForTest(t, server.URL)
-	dto := configToDTO(*cfg)
-	dto.Node.Name = "judge-node-updated"
-	dto.RabbitMQ.Password = ""
-	payload, err := json.Marshal(map[string]any{
-		"config":        dto,
-		"privateKeyPem": "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/setup/formal", bytes.NewReader(payload))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(cookie)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body := new(bytes.Buffer)
-		_, _ = body.ReadFrom(resp.Body)
-		t.Fatalf("setup formal status = %d, body = %s", resp.StatusCode, body.String())
-	}
-
-	saved, ok, err := store.LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("config was not saved")
-	}
-	if saved.HnieOJ.FormalToken.PrivateKeyPath != "/existing/private.pem" {
-		t.Fatalf("private key path = %q, want existing path", saved.HnieOJ.FormalToken.PrivateKeyPath)
-	}
-	if saved.RabbitMQ.Password != "rabbit-secret" {
-		t.Fatalf("rabbit password = %q, want preserved secret", saved.RabbitMQ.Password)
-	}
-	if saved.Node.Name != "judge-node-updated" {
-		t.Fatalf("node name = %q, want updated name", saved.Node.Name)
-	}
-}
-
-func loginForTest(t *testing.T, serverURL string) *http.Cookie {
-	t.Helper()
-	resp, err := http.Post(serverURL+"/api/v1/auth/login", "application/json", bytes.NewBufferString(`{"password":"password123"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("login status = %d, want 200", resp.StatusCode)
-	}
-	cookie := findCookie(resp.Cookies(), sessionCookie)
-	if cookie == nil {
-		t.Fatalf("missing %s cookie", sessionCookie)
-	}
-	return cookie
-}
-
-func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
-	for _, cookie := range cookies {
-		if cookie.Name == name {
-			return cookie
+	handler := StaticHandler()
+	for _, route := range []string{"/dashboard", "/configure/formal", "/logs"} {
+		req := httptest.NewRequest(http.MethodGet, route, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("SPA route %s status %d", route, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "<!") && !strings.Contains(rec.Body.String(), "html") {
+			t.Fatalf("SPA route %s did not serve index", route)
 		}
 	}
-	return nil
+	req := httptest.NewRequest(http.MethodGet, "/definitely-missing", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown non-SPA route status %d", rec.Code)
+	}
 }

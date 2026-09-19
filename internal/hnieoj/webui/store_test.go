@@ -1,14 +1,21 @@
 package webui
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestStoreAdminPassword(t *testing.T) {
 	store := NewStore(t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
 	if store.AdminInitialized() {
 		t.Fatal("admin should not be initialized")
 	}
 	if err := store.SaveAdminPassword("password123"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("save password: %v", err)
 	}
 	if !store.AdminInitialized() {
 		t.Fatal("admin should be initialized")
@@ -21,20 +28,38 @@ func TestStoreAdminPassword(t *testing.T) {
 	}
 }
 
-func TestStoreEnsureTempIdentityReusesFiles(t *testing.T) {
-	store := NewStore(t.TempDir())
-	id1, secret1, err := store.EnsureTempIdentity()
+func TestStoreBootstrapTokenIsSecretAndConsumable(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	if store.BootstrapConfigured() {
+		t.Fatal("bootstrap should not be configured initially")
+	}
+	if err := store.WriteBootstrapToken("one-time-token"); err != nil {
+		t.Fatalf("write bootstrap: %v", err)
+	}
+	if !store.BootstrapConfigured() {
+		t.Fatal("bootstrap should be configured")
+	}
+	raw, err := os.ReadFile(store.BootstrapPath())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read bootstrap: %v", err)
 	}
-	id2, secret2, err := store.EnsureTempIdentity()
+	if strings.TrimSpace(string(raw)) != "one-time-token" {
+		t.Fatalf("bootstrap content = %q", string(raw))
+	}
+	fi, err := os.Stat(store.BootstrapPath())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("stat bootstrap: %v", err)
 	}
-	if id1 == "" || secret1 == "" {
-		t.Fatal("identity should be generated")
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("bootstrap perm = %04o, want 0600", perm)
 	}
-	if id1 != id2 || secret1 != secret2 {
-		t.Fatalf("identity should be reused: %q/%q %q/%q", id1, id2, secret1, secret2)
+}
+
+func TestStoreIdentityPathUnderStateDir(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	if got := store.IdentityPath(); !strings.HasPrefix(got, dir) {
+		t.Fatalf("identity path %q not under state dir %q", got, dir)
 	}
 }
