@@ -1,0 +1,93 @@
+# HnieOJ 判题节点示例配置（统一 Ed25519 身份 + WSS，无 RabbitMQ/Nacos/共享 token）。
+# 部署时复制为实际运行配置后再修改，不要提交真实 bootstrap/私钥/AccessToken。
+#
+# 关键变化：WSS 是任务/租约/心跳/控制通道；HTTPS 只用于入网、签名测试数据下载与密钥轮换。
+# 节点身份是本地真实随机 Ed25519 keypair，首次生成后立即原子持久化，再挑战注册；
+# 重启复用同一 enrollmentId/key，不消耗新的 bootstrap。
+
+node:
+  # 判题节点名称。建议全局唯一，便于后端日志与运维定位。
+  name: judge-node-01
+  # formal 表示正式长期节点；temp 表示临时扩容节点。两者都使用一次性 Bootstrap + Ed25519。
+  type: formal
+  # 本节点处理的最大判题任务数。后端会按核准额度封顶，节点上报不能提高额度。
+  maxConcurrency: 4
+  # 支持的判题模式。未完成联调前只保留 default。
+  supportedJudgeModes:
+    - default
+
+hnieoj:
+  # 后端 HTTPS 地址。远程必须 HTTPS；仅显式回环地址允许明文 HTTP 用于本地开发。
+  # 节点不跳过证书校验，也没有 skip-cert 开关。
+  baseUrl: "https://oj.example.com"
+  # WSS 任务通道地址。留空时自动推导为 wss://<host>/ws/judge/node。
+  wssUrl: ""
+  # 签名 audience，需与服务端一致；留空时取 baseUrl 的 host。
+  audience: ""
+  requestTimeout: "30s"
+
+identity:
+  # 本地长期身份文件：包含真实随机 Ed25519 私钥、enrollmentId、nodeId/keyId、
+  # 轮换 pending/grace 状态。POSIX 目录 0700/文件 0600，Windows current-user-only ACL。
+  # 绝不能挂载进沙箱或对外返回。
+  file: "/var/lib/hnieoj-judge-node/identity.json"
+  # 运行期安全状态目录（结果持久队列等）。
+  stateDir: "/var/lib/hnieoj-judge-node"
+
+bootstrap:
+  # 一次性入网 bootstrap 明文文件（0600）。注册成功后节点删除该文件；
+  # 注册响应丢失时用同一 enrollmentId+公钥+bootstrap 重试可恢复同一 node。
+  tokenFile: "/etc/hnieoj/judge-node/bootstrap.token"
+  # 也可内联（不推荐，避免写入版本库）；该值不会出现在日志中。
+  token: ""
+
+wss:
+  # 控制帧/任务结果帧上限。超过即关闭连接，避免无界内存。
+  controlFrameBytes: 65536
+  taskFrameBytes: 4194304
+  # 建连后完成认证的时限；单请求响应超时。
+  authDeadline: "10s"
+  requestTimeout: "30s"
+  # 掉线重连指数退避区间（带抖动）。
+  connectMinBackoff: "500ms"
+  connectMaxBackoff: "30s"
+  # AUTH_OK 未给出心跳间隔时的兜底。
+  heartbeatInterval: "30s"
+  # 单写者队列写超时。
+  writeTimeout: "10s"
+  # 终态结果有界持久队列：server TASK_RESULT_ACK 后删除。队列满即停止接新任务。
+  resultQueueDir: "/var/lib/hnieoj-judge-node/results"
+  resultMaxRecords: 256
+  resultMaxBytes: 67108864
+  resultMaxRecordBytes: 4194304
+  resultTtl: "72h"
+  resultRetryBackoff: "2s"
+
+rotation:
+  # 自动密钥轮换（prepare/confirm/query，两阶段持久状态，崩溃可恢复）。
+  enabled: true
+  # 默认 30 天；测试可注入短周期。
+  interval: "720h"
+  # 确认后旧 key 的 grace 期限，到期清理，不永久保留 old key。
+  grace: "5m"
+  confirmTimeout: "30s"
+
+testdata:
+  # 测试数据缓存目录，部署脚本会挂载宿主机持久化目录到这里。
+  cacheRoot: "/data/oj/judge-cache"
+  maxCacheBytes: 21474836480
+  maxUnusedDuration: "72h"
+  cleanupInterval: "1h"
+  statsInterval: "5m"
+
+gojudge:
+  # go-judge sandbox 地址（本地/内网 HTTP 端点，与后端 HTTPS 要求无关）。
+  endpoint: "http://127.0.0.1:5050"
+  authToken: ""
+
+worker:
+  # 空队列退避区间（有上限、带抖动）。
+  emptyMinBackoff: "200ms"
+  emptyMaxBackoff: "5s"
+  # SIGTERM 后停止领取新任务，但在该窗口内排空在途任务并继续 WSS 续租/发结果。
+  drainTimeout: "5m"

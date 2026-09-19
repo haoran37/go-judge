@@ -1,0 +1,65 @@
+# formal 判题节点示例配置。
+# 管理员通过 POST /api/admin/judge/nodes/bootstrap-tokens 签发一次性 bootstrap（formal）。
+# 节点首次启动生成随机 Ed25519 keypair 并原子持久化，再以 bootstrap 完成挑战注册；
+# 重启复用同一身份，不消耗新 bootstrap。任务通道为 WSS，不再有 credential token。
+
+node:
+  name: judge-node-01
+  type: formal
+  maxConcurrency: 2
+  supportedJudgeModes:
+    - default
+
+hnieoj:
+  # 远程后端必须 HTTPS；节点不跳过证书校验。
+  baseUrl: "https://oj.example.com"
+  wssUrl: ""
+  audience: ""
+  requestTimeout: "30s"
+
+identity:
+  file: "/var/lib/hnieoj-judge-node/identity.json"
+  stateDir: "/var/lib/hnieoj-judge-node"
+
+bootstrap:
+  # 运维把管理员签发的一次性明文 bootstrap 放到该 0600 文件（或由 WebUI 写入）。
+  tokenFile: "/etc/hnieoj/judge-node/bootstrap.token"
+  token: ""
+
+wss:
+  controlFrameBytes: 65536
+  taskFrameBytes: 4194304
+  authDeadline: "10s"
+  requestTimeout: "30s"
+  connectMinBackoff: "500ms"
+  connectMaxBackoff: "30s"
+  heartbeatInterval: "30s"
+  writeTimeout: "10s"
+  resultQueueDir: "/var/lib/hnieoj-judge-node/results"
+  resultMaxRecords: 256
+  resultMaxBytes: 67108864
+  resultMaxRecordBytes: 4194304
+  resultTtl: "72h"
+  resultRetryBackoff: "2s"
+
+rotation:
+  enabled: true
+  interval: "720h"
+  grace: "5m"
+  confirmTimeout: "30s"
+
+testdata:
+  cacheRoot: "/data/oj/judge-cache"
+  maxCacheBytes: 21474836480
+  maxUnusedDuration: "72h"
+  cleanupInterval: "1h"
+  statsInterval: "5m"
+
+gojudge:
+  endpoint: "http://go-judge-sandbox:5050"
+  authToken: ""
+
+worker:
+  emptyMinBackoff: "200ms"
+  emptyMaxBackoff: "5s"
+  drainTimeout: "5m"

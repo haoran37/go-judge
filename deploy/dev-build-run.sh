@@ -80,12 +80,15 @@ run_container() {
     docker rm -f "${CONTAINER_NAME}" >/dev/null
   fi
   log "正在启动开发容器：${CONTAINER_NAME}"
+  # upstream 沙箱在 Docker 默认 private cgroup namespace 下可能报 cgroup path empty，需使用宿主机 cgroup 命名空间。
   docker run -d \
     --name "${CONTAINER_NAME}" \
     --restart unless-stopped \
     --privileged \
+    --cgroupns=host \
     --shm-size=512m \
-    -p "${WEBUI_HOST_PORT}:3723" \
+    -e HNIEOJ_WEB_ADDR=0.0.0.0:3723 \
+    -p "127.0.0.1:${WEBUI_HOST_PORT}:3723" \
     -v "${STATE_DIR}:/var/lib/hnieoj-judge-node" \
     -v "${CACHE_DIR}:/data/oj/judge-cache" \
     "${IMAGE}" >/dev/null

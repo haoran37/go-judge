@@ -1,0 +1,64 @@
+# temp 判题节点示例配置。
+# temp 节点适合临时扩容/短期比赛。管理员签发带 authorizationUntil 的一次性 bootstrap，
+# 节点用同一套 Ed25519 身份 + 挑战注册入网；auth 到期后凭有效密钥重新认证，不重新注册。
+
+node:
+  name: judge-node-temp-01
+  type: temp
+  maxConcurrency: 2
+  supportedJudgeModes:
+    - default
+
+hnieoj:
+  baseUrl: "https://oj.example.com"
+  wssUrl: ""
+  audience: ""
+  requestTimeout: "30s"
+
+identity:
+  # 临时节点同样有独立本地身份文件，不能与 formal 复用。
+  file: "/var/lib/hnieoj-judge-node/identity.json"
+  stateDir: "/var/lib/hnieoj-judge-node"
+
+bootstrap:
+  # 临时授权一次性 bootstrap；注册成功即删除，不再有 authCode/token 兑换流程。
+  tokenFile: "/etc/hnieoj/judge-node/bootstrap.token"
+  token: ""
+
+wss:
+  controlFrameBytes: 65536
+  taskFrameBytes: 4194304
+  authDeadline: "10s"
+  requestTimeout: "30s"
+  connectMinBackoff: "500ms"
+  connectMaxBackoff: "30s"
+  heartbeatInterval: "30s"
+  writeTimeout: "10s"
+  resultQueueDir: "/var/lib/hnieoj-judge-node/results"
+  resultMaxRecords: 256
+  resultMaxBytes: 67108864
+  resultMaxRecordBytes: 4194304
+  resultTtl: "72h"
+  resultRetryBackoff: "2s"
+
+rotation:
+  enabled: true
+  interval: "720h"
+  grace: "5m"
+  confirmTimeout: "30s"
+
+testdata:
+  cacheRoot: "/data/oj/judge-cache"
+  maxCacheBytes: 21474836480
+  maxUnusedDuration: "72h"
+  cleanupInterval: "1h"
+  statsInterval: "5m"
+
+gojudge:
+  endpoint: "http://go-judge-sandbox:5050"
+  authToken: ""
+
+worker:
+  emptyMinBackoff: "200ms"
+  emptyMaxBackoff: "5s"
+  drainTimeout: "5m"

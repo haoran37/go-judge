@@ -36,8 +36,9 @@ check_docker() {
 
 prepare_dirs() {
   mkdir -p "${STATE_DIR}" "${CACHE_DIR}"
-  chmod 700 "${STATE_DIR}" 2>/dev/null || true
-  chmod 755 "${CACHE_DIR}" 2>/dev/null || true
+  # 显式加固权限；chmod 失败必须暴露，绝不静默吞掉。
+  chmod 700 "${STATE_DIR}"
+  chmod 755 "${CACHE_DIR}"
 }
 
 preflight() {
@@ -60,18 +61,22 @@ deploy() {
     docker rm -f "${CONTAINER_NAME}" >/dev/null
   fi
   log "正在启动 WebUI 判题机容器：${CONTAINER_NAME}"
+  # 容器内 WebUI 显式绑定 0.0.0.0 以便端口映射；宿主机只映射到 loopback，不暴露公网。
+  # 节点身份/结果队列位于 STATE_DIR（identity.json、results/），持久化且 0700。
   docker run -d \
     --name "${CONTAINER_NAME}" \
     --restart unless-stopped \
     --privileged \
+    --cgroupns=host \
     --shm-size=512m \
-    -p "${WEBUI_HOST_PORT}:3723" \
+    -e HNIEOJ_WEB_ADDR=0.0.0.0:3723 \
+    -p "127.0.0.1:${WEBUI_HOST_PORT}:3723" \
     -v "${STATE_DIR}:/var/lib/hnieoj-judge-node" \
     -v "${CACHE_DIR}:/data/oj/judge-cache" \
     "${IMAGE}" >/dev/null
   log "部署完成"
   log "WebUI 地址：http://127.0.0.1:${WEBUI_HOST_PORT}"
-  log "首次访问后在页面中创建管理员密码，并完成正式/临时节点初始化"
+  log "首次访问后创建管理员密码，填写一次性 Bootstrap 完成 Ed25519 入网；启动后 WSS 建立任务通道"
 }
 
 restart() {
@@ -119,9 +124,20 @@ usage() {
   WEBUI_HOST_PORT=${WEBUI_HOST_PORT}
 
 端口说明：
-  容器内 WebUI 固定监听 3723。
+  容器内 WebUI 固定监听 3723（容器内 HNIEOJ_WEB_ADDR 显式设为 0.0.0.0 以配合端口映射）。
+  宿主机默认只映射到 127.0.0.1，不对公网暴露。
   如需修改宿主机访问端口，只修改 Docker 端口映射，例如：
   WEBUI_HOST_PORT=8080 bash deploy/deploy-judge-node.sh deploy
+
+身份与入网：
+  节点身份文件与结果持久队列保存在 STATE_DIR（默认 /var/lib/hnieoj-judge-node），
+  权限 0700；私钥只在此目录，绝不挂载进沙箱。首次入网用一次性 Bootstrap，
+  重启复用同一 enrollmentId/key，不消耗新 Bootstrap。
+
+cgroup 说明：
+  upstream go-judge 沙箱在默认 private cgroup namespace 下可能拿不到 cgroup path
+  （cgroup path empty）。脚本显式使用 --cgroupns=host，让容器使用宿主机 cgroup
+  命名空间；该参数需在支持 cgroup v2 的 Linux + Docker 上验证。
 EOF
 }
 
