@@ -106,6 +106,8 @@ func getDefaultMount(tmpFsConf string) *mount.Builder {
 		WithBind("/dev/null", "dev/null", false).
 		// ghc wants /var/lib/ghc
 		WithBind("/var/lib/ghc", "var/lib/ghc", true).
+		// java 17 wants /etc/java-17-openjdk
+		WithBind("/etc/java-17-openjdk", "etc/java-17-openjdk", true).
 		// javaScript wants /dev/urandom
 		WithBind("/dev/urandom", "dev/urandom", false).
 		// additional devices
