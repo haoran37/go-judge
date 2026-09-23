@@ -37,6 +37,24 @@ type lifecycleServer struct {
 	drained  chan struct{}
 }
 
+func TestExternalSandboxDoesNotStartLocalProcess(t *testing.T) {
+	for _, endpoint := range []string{"http://go-judge-sandbox:5050", "http://127.0.0.1:15050"} {
+		t.Run(endpoint, func(t *testing.T) {
+			cfg := *config.Default()
+			cfg.GoJudge.Endpoint = endpoint
+			manager := NewManager(logging.NopLogger{})
+			manager.SetConfig(cfg)
+			if err := manager.startSandboxProcess(context.Background()); err != nil {
+				t.Fatalf("external sandbox must not require a local executable: %v", err)
+			}
+			if manager.sandbox != nil {
+				t.Fatal("external sandbox unexpectedly started a local process")
+			}
+			manager.stopSandbox()
+		})
+	}
+}
+
 func newLifecycleServer(t *testing.T, pubKey string) *lifecycleServer {
 	s := &lifecycleServer{
 		t: t, pubKey: pubKey, audience: "judge.example.test",

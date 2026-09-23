@@ -542,6 +542,19 @@ func (m *Manager) fail(err error) {
 }
 
 func (m *Manager) startSandboxProcess(ctx context.Context) error {
+	cfg, ok := m.Config()
+	if !ok {
+		return errors.New("judge node is not configured")
+	}
+	endpoint, err := url.Parse(cfg.GoJudge.Endpoint)
+	if err != nil {
+		return err
+	}
+	// 仅默认本机端点由 Agent 托管；Compose 等外部沙箱已有独立生命周期。
+	if endpoint.Scheme != "http" || endpoint.Port() != "5050" ||
+		(endpoint.Hostname() != "127.0.0.1" && endpoint.Hostname() != "localhost") {
+		return nil
+	}
 	cmd := exec.CommandContext(ctx, "/usr/local/bin/go-judge",
 		"-http-addr=127.0.0.1:5050",
 		"-mount-conf=/opt/go-judge/mount.yaml",

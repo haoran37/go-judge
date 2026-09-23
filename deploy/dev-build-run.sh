@@ -7,6 +7,9 @@ BRANCH="${BRANCH:-develop}"
 REPO_URL="${REPO_URL:-https://github.com/haoran37/go-judge.git}"
 WORK_DIR="${WORK_DIR:-/opt/hnieoj-go-judge-dev}"
 IMAGE="${IMAGE:-haoran37/hnieoj-go-judge:dev-local}"
+GO_BUILDER_IMAGE="${GO_BUILDER_IMAGE:-golang:1.26-bookworm}"
+DEBIAN_RUNTIME_IMAGE="${DEBIAN_RUNTIME_IMAGE:-debian:bookworm-slim}"
+DEBIAN_MIRROR="${DEBIAN_MIRROR:-deb.debian.org}"
 CONTAINER_NAME="${CONTAINER_NAME:-hnieoj-judge-node-dev}"
 STATE_DIR="${STATE_DIR:-/tmp/hnieoj-judge-node-dev/state}"
 CACHE_DIR="${CACHE_DIR:-/tmp/hnieoj-judge-node-dev/cache}"
@@ -68,7 +71,11 @@ build_image() {
   check_docker
   update_develop
   log "正在构建开发镜像：${IMAGE}"
-  docker build -f "${REPO_DIR}/Dockerfile.hnieoj" -t "${IMAGE}" "${REPO_DIR}"
+  docker build -f "${REPO_DIR}/Dockerfile.hnieoj" \
+    --build-arg "GO_BUILDER_IMAGE=${GO_BUILDER_IMAGE}" \
+    --build-arg "DEBIAN_RUNTIME_IMAGE=${DEBIAN_RUNTIME_IMAGE}" \
+    --build-arg "DEBIAN_MIRROR=${DEBIAN_MIRROR}" \
+    -t "${IMAGE}" "${REPO_DIR}"
 }
 
 run_container() {
@@ -130,6 +137,9 @@ usage() {
   REPO_URL=${REPO_URL}
   WORK_DIR=${WORK_DIR}
   IMAGE=${IMAGE}
+  GO_BUILDER_IMAGE=${GO_BUILDER_IMAGE}
+  DEBIAN_RUNTIME_IMAGE=${DEBIAN_RUNTIME_IMAGE}
+  DEBIAN_MIRROR=${DEBIAN_MIRROR}
   CONTAINER_NAME=${CONTAINER_NAME}
   STATE_DIR=${STATE_DIR}
   CACHE_DIR=${CACHE_DIR}
@@ -138,6 +148,9 @@ usage() {
 示例：
   bash deploy/dev-build-run.sh deploy
   WEBUI_HOST_PORT=8080 bash deploy/dev-build-run.sh deploy
+  GO_BUILDER_IMAGE=public.ecr.aws/docker/library/golang:1.26-bookworm \
+    DEBIAN_RUNTIME_IMAGE=public.ecr.aws/docker/library/debian:bookworm-slim \
+    DEBIAN_MIRROR=mirrors.aliyun.com bash deploy/dev-build-run.sh build
 EOF
 }
 

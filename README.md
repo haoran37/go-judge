@@ -127,4 +127,21 @@ go build -o ./tmp/hnieoj-judge-node ./cmd/hnieoj-judge-node
 docker build -f Dockerfile.hnieoj -t haoran37/hnieoj-go-judge:dev .
 ```
 
+当本机 Docker 无法稳定下载基础镜像或 Debian 软件包时，可分别覆盖构建镜像和 apt 镜像站。以下命令已在 macOS ARM64 上完成构建；若 apt 大包下载超时，先在另一个终端建立到可访问阿里云镜像站的 Linux 主机的临时转发：
+
+```bash
+ssh -N -L 127.0.0.1:3142:mirrors.aliyun.com:80 -p <SSH端口> <用户>@<Linux主机>
+```
+
+然后在仓库目录构建；结束后关闭上述 SSH 会话：
+
+```bash
+docker build -f Dockerfile.hnieoj \
+  --build-arg GO_BUILDER_IMAGE=docker.1ms.run/library/golang:1.26-bookworm \
+  --build-arg DEBIAN_RUNTIME_IMAGE=docker.1ms.run/library/debian:bookworm-slim \
+  --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
+  --build-arg HTTP_PROXY=http://host.docker.internal:3142 \
+  -t haoran37/hnieoj-go-judge:dev .
+```
+
 连接本地后端调试时，`hnieoj.baseUrl` 可填 `http://127.0.0.1:8800`；远程必须 HTTPS。

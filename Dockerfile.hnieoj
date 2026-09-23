@@ -1,4 +1,7 @@
-FROM golang:1.26-bookworm AS builder
+ARG GO_BUILDER_IMAGE=golang:1.26-bookworm
+ARG DEBIAN_RUNTIME_IMAGE=debian:bookworm-slim
+
+FROM ${GO_BUILDER_IMAGE} AS builder
 
 ENV GOPROXY=https://goproxy.cn,direct \
     GOSUMDB=sum.golang.google.cn
@@ -12,16 +15,14 @@ COPY . .
 RUN go build -trimpath -ldflags="-s -w" -o /out/go-judge ./cmd/go-judge \
     && go build -trimpath -ldflags="-s -w" -o /out/hnieoj-judge-node ./cmd/hnieoj-judge-node
 
-FROM debian:bookworm-slim
+FROM ${DEBIAN_RUNTIME_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_MIRROR=deb.debian.org
 ENV TZ=Asia/Shanghai
 
-# 国内开发时可取消注释以下行以使用阿里云的 Debian 镜像源，提升构建速度
-# RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
-
-RUN apt-get update \
-    && apt-get upgrade -y \
+RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \
